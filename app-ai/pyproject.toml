@@ -1,0 +1,30 @@
+[tool.poetry]
+name = "app-ai"
+version = "1.0.0"
+description = "LangChain ReAct AI agent powered by Claude"
+authors = []
+
+[tool.poetry.dependencies]
+python              = "^3.11"
+fastapi             = "^0.111"
+uvicorn             = {extras = ["standard"], version = "^0.29"}
+pydantic            = "^2.7"
+pydantic-settings   = "^2.2"
+langchain-anthropic  = "^0.1"
+langchain-core      = "^0.3"
+langchain-text-splitters = "^0.2"
+pymilvus            = "^2.4"
+openai              = "^1.30"
+tavily-python       = "^0.3"
+
+[tool.poetry.dev-dependencies]
+pytest              = "^8.0"
+pytest-asyncio      = "^0.23"
+
+[build-system]
+requires = ["poetry-core"]
+build-backend = "poetry.core.masonry.api"
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
