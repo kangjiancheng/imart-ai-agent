@@ -100,13 +100,30 @@ class RAGRetriever:
             #   The agent continues without RAG rather than crashing at startup.
             from pymilvus import MilvusClient
 
-            # Create a Milvus client for this request.
-            # uri = the HTTP address of the Milvus service.
-            # f"http://..." = f-string interpolation: inserts host and port values.
-            # In TypeScript: `http://${settings.milvusHost}:${settings.milvusPort}`
+            # Milvus Lite: uri is a local file path (e.g. "./milvus_local.db").
+            # pymilvus creates the file automatically — no Docker or server needed.
+            # To use a full Milvus server instead, set MILVUS_URI=http://host:port in .env.
             client = MilvusClient(
-                uri=f"http://{settings.milvus_host}:{settings.milvus_port}"
+                uri=settings.milvus_uri,
+                token=settings.milvus_token or None,
+                # token="user:password" for Milvus server auth (e.g. "root:Milvus").
+                # None = no auth (used for Milvus Lite local file).
             )
+
+            # Ensure the collection exists before searching.
+            # Milvus Lite does not auto-create collections — we create it here on first use.
+            # `has_collection()` returns True/False without raising an exception.
+            if not client.has_collection(settings.milvus_collection_knowledge):
+                client.create_collection(
+                    collection_name=settings.milvus_collection_knowledge,
+                    dimension=1536,
+                    # 1536 = the output size of text-embedding-3-small.
+                    # This MUST match the embedding model's output dimension.
+                    enable_dynamic_field=True,
+                    # enable_dynamic_field=True: allows inserting any extra fields
+                    # (like "content" and "source") without defining a strict schema.
+                    # Those fields are stored as a JSON blob alongside the vector.
+                )
 
             # Step 1: Convert the user's query text to a vector.
             # await = pause here until OpenAI returns the embedding (non-blocking).

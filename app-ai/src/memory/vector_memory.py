@@ -109,10 +109,21 @@ class VectorMemory:
             #   App startup never crashes due to Milvus being unavailable.
             from pymilvus import MilvusClient
 
+            # Milvus Lite: uri is a local .db file path — no Docker needed.
             client = MilvusClient(
-                uri=f"http://{settings.milvus_host}:{settings.milvus_port}"
-                # f-string: inserts host ("localhost") and port (19530) values.
+                uri=settings.milvus_uri,
+                token=settings.milvus_token or None,
             )
+
+            # Create the collection on first use if it doesn't exist yet.
+            if not client.has_collection(self.COLLECTION):
+                client.create_collection(
+                    collection_name=self.COLLECTION,
+                    dimension=1536,
+                    enable_dynamic_field=True,
+                    # Dynamic fields store user_id, content, tags, created_at
+                    # without needing a strict schema definition.
+                )
 
             # Step 1: Embed the current query to find relevant memories.
             # await pauses until OpenAI returns the embedding vector.
@@ -193,9 +204,19 @@ class VectorMemory:
             # int(time.time()) converts to integer (e.g. 1709042400).
             # Used to record when this memory was created.
 
+            # Milvus Lite: uri is a local .db file path — no Docker needed.
             client = MilvusClient(
-                uri=f"http://{settings.milvus_host}:{settings.milvus_port}"
+                uri=settings.milvus_uri,
+                token=settings.milvus_token or None,
             )
+
+            # Create the collection on first use if it doesn't exist yet.
+            if not client.has_collection(self.COLLECTION):
+                client.create_collection(
+                    collection_name=self.COLLECTION,
+                    dimension=1536,
+                    enable_dynamic_field=True,
+                )
 
             # Step 1: Embed the memory content for vector storage.
             # This embedding is what Milvus searches against later in recall().

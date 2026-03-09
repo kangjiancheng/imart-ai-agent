@@ -7,3 +7,10 @@ __pycache__/
 .DS_Store
 dist/
 *.egg-info/
+
+# Milvus Lite local database files
+milvus_local.db
+.milvus_local.db.lock
+
+# Milvus Docker volume data
+volumes/milvus/

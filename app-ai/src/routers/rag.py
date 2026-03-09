@@ -137,8 +137,17 @@ async def ingest_document(
             # Step 7: Connect to Milvus.
             from pymilvus import MilvusClient
             client = MilvusClient(
-                uri=f"http://{settings.milvus_host}:{settings.milvus_port}"
+                uri=settings.milvus_uri,
+                token=settings.milvus_token or None,
             )
+
+            # Create the collection if it doesn't exist yet (Milvus Lite on first ingest).
+            if not client.has_collection(settings.milvus_collection_knowledge):
+                client.create_collection(
+                    collection_name=settings.milvus_collection_knowledge,
+                    dimension=1536,
+                    enable_dynamic_field=True,
+                )
 
             # Step 8: For each chunk, embed it and store it in Milvus.
             for chunk in chunks:

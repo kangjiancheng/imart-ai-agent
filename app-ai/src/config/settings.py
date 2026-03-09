@@ -65,11 +65,21 @@ class Settings(BaseSettings):
     # that captures its meaning. Similar texts have similar numbers.
 
     # ── Milvus vector database ────────────────────────────────────────────────
-    milvus_host: str = "localhost"
-    # Where Milvus is running. "localhost" for local dev; "milvus" for Docker Compose.
+    milvus_uri: str = "./milvus_local.db"
+    # milvus_uri: str # No default = REQUIRED. App won't start if MILVUS_URI is missing from .env
+    # The milvus_uri from .env variable MILVUS_URI overrides this default.
+    # milvus_uri: str = "./milvus_local.db": use Milvus Lite automatically" which lets the app work out of the box without any .env configuration.
+    # Milvus Lite — an embedded, file-based Milvus that needs NO Docker or server.
+    # The URI is just a local file path; pymilvus creates the file automatically.
+    #
+    # To switch to a full Milvus server (e.g. Docker), set in .env:
+    #   MILVUS_URI=http://localhost:19530
 
-    milvus_port: int = 19530
-    # Milvus's default port. pydantic auto-converts "19530" string → int 19530.
+    milvus_token: str = ""
+    # Authentication token for Milvus server in "user:password" format.
+    # Default Milvus credentials: root:Milvus
+    # Set MILVUS_TOKEN=root:Milvus in .env when using Docker Milvus.
+    # Leave empty ("") for Milvus Lite (no auth needed).
 
     milvus_collection_knowledge: str = "knowledge_base"
     # Milvus collection name for RAG documents (company docs, policies, etc.).

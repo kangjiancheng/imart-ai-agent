@@ -18,6 +18,10 @@ build/
 .ruff_cache/
 *.so
 
+# milvus local db files (if you use milvus-lite for local development)
+milvus_local.db
+.milvus_local.db.lock
+
 # ─── Node.js (app-service / app-web) ────────────────────────────────────────
 node_modules/
 dist/

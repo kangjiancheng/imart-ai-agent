@@ -276,7 +276,7 @@ Per-user facts are stored in the Milvus `user_memory` collection, filtered by `u
 
 ---
 
-## Project Setup
+## Project Setup Development
 
 ### Prerequisites
 
@@ -348,20 +348,45 @@ cp .env.example .env
 # Open .env and fill in your API keys
 ```
 
-| Variable            | Required | Description                                               |
-| ------------------- | -------- | --------------------------------------------------------- |
-| `ANTHROPIC_API_KEY` | Yes      | Claude API key from console.anthropic.com                 |
-| `OPENAI_API_KEY`    | Yes      | OpenAI key for embeddings (text-embedding-3-small)        |
-| `MILVUS_HOST`       | No       | Milvus host (default: `localhost`)                        |
-| `MILVUS_PORT`       | No       | Milvus port (default: `19530`)                            |
-| `TAVILY_API_KEY`    | No       | Tavily search API key — web search is disabled if missing |
+| Variable            | Required | Description                                                |
+| ------------------- | -------- | ---------------------------------------------------------- |
+| `ANTHROPIC_API_KEY` | Yes      | Claude API key from console.anthropic.com                  |
+| `OPENAI_API_KEY`    | Yes      | OpenAI key for embeddings (text-embedding-3-small)         |
+| `MILVUS_URI`        | No       | Milvus URI (default: `./milvus_local.db` — Milvus Lite)    |
+| `MILVUS_TOKEN`      | No       | Milvus auth token `user:password` (only for Docker Milvus) |
+| `TAVILY_API_KEY`    | No       | Tavily search API key — web search is disabled if missing  |
 
-### 6. Start Milvus (vector database, via Docker)
+### 6. Start Milvus (vector database)
+
+**Option A — Milvus Lite (recommended for local dev, no Docker needed)**
+
+No setup required. Set in `.env`:
+
+```
+MILVUS_URI=./milvus_local.db
+```
+
+A local `.db` file is created automatically on first use.
+
+**Option B — Docker Milvus (for production-like setup)**
 
 ```bash
-docker run -d --name milvus \
-  -p 19530:19530 \
-  milvusdb/milvus:latest standalone
+# Download the official setup script
+curl -sfL https://raw.githubusercontent.com/milvus-io/milvus/master/scripts/standalone_embed.sh -o standalone_embed.sh
+
+# Start Milvus (enter your Mac login password when prompted)
+bash standalone_embed.sh start
+
+# Stop / delete
+bash standalone_embed.sh stop
+bash standalone_embed.sh delete
+```
+
+Then set in `.env`:
+
+```
+MILVUS_URI=http://localhost:19530
+MILVUS_TOKEN=root:Milvus
 ```
 
 ### 7. Run the server
@@ -386,7 +411,18 @@ Server starts at `http://localhost:8000`.
 
 ### Daily workflow (after first-time setup)
 
+**Option A — Milvus Lite (default)**
+
 ```bash
+cd app-ai
+source venv/bin/activate
+uvicorn src.main:app --reload --port 8000
+```
+
+**Option B — Docker Milvus**
+
+```bash
+bash standalone_embed.sh start   # start Milvus (enter Mac login password)
 cd app-ai
 source venv/bin/activate
 uvicorn src.main:app --reload --port 8000
