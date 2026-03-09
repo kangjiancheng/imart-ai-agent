@@ -51,53 +51,62 @@ Each step below builds one piece of this. By Step 12 you have a working server.
 
 ## Step 0 — Prerequisites
 
-You need these installed before starting:
+Install these tools before starting:
+
+**pyenv** — manages Python versions per project (like `nvm` for Node)
 
 ```bash
-# Check Python version — must be 3.11 or higher
-python --version       # Python 3.11.x or 3.12.x
+# macOS
+brew install pyenv
 
-# If not installed on macOS:
-brew install python@3.11
-
-# Check pip
-pip --version
+# Verify
+pyenv --version
 ```
 
-You also need:
+**Docker Desktop** — required to run Milvus (vector database) in later steps.
+Download from [docker.com](https://www.docker.com/products/docker-desktop).
 
-- A free Anthropic API key from [console.anthropic.com](https://console.anthropic.com)
-- Docker Desktop running (for Milvus in later steps)
+You also need API keys for:
+
+- **Anthropic** — [console.anthropic.com](https://console.anthropic.com)
+- **OpenAI** — [platform.openai.com](https://platform.openai.com) (used for embeddings only)
+- **Tavily** (optional) — [tavily.com](https://tavily.com) (web search tool)
 
 ---
 
 ## Step 1 — Project Setup
 
-### 1.1 Create the folder and enter it
+### 1.1 Enter the project folder
 
 ```bash
-# You should already be inside the agents repo. app-ai/ is already created.
 cd app-ai
 ```
 
-### 1.2 Create a Python virtual environment
-
-A virtual environment is exactly like `node_modules` — it keeps your project's packages isolated.
+### 1.2 Install and pin the Python version
 
 ```bash
-# Create the virtual environment inside the project folder
-python -m venv venv
+pyenv install 3.11.9    # skip if already installed
+pyenv local 3.11.9      # writes .python-version file — commit this
 
-# Activate it (do this every time you open a new terminal)
-source venv/bin/activate          # macOS / Linux
-# venv\Scripts\activate           # Windows
-
-# Your prompt should now show (venv) at the start
+# Verify
+python --version        # → Python 3.11.9
 ```
 
-> **Rule:** Always activate `venv` before running `pip install` or `python`. If you forget, packages install globally and projects conflict.
+> **Why pyenv instead of `brew install python`?** `brew` updates Python globally and can break other projects. `pyenv local` pins the version per folder, like `.nvmrc` does for Node.
 
-### 1.3 Install dependencies
+### 1.3 Create and activate a virtual environment
+
+A virtual environment is like `node_modules` — it keeps this project's packages isolated from everything else on your machine.
+
+```bash
+python -m venv venv
+source venv/bin/activate      # macOS / Linux — prompt changes to (venv)
+# venv\Scripts\activate       # Windows
+```
+
+> **Always activate venv before running `pip` or `python`.** If you forget, packages install globally and projects conflict.
+
+### 1.4 Install dependencies
 
 ```bash
 pip install \
@@ -112,34 +121,27 @@ pip install \
 Save the dependency list so anyone can recreate the environment:
 
 ```bash
+# You manually pip installed a new package and want to save it to the requirements file
 pip freeze > requirements.txt
 ```
 
-### 1.4 Create the `.env` file
+### 1.5 Set up environment variables
 
 ```bash
-# Create the env file (NEVER commit this to Git)
-touch .env
+cp .env.example .env
+# Open .env and fill in your API keys
 ```
 
-Add these values to `.env`:
-
 ```ini
-# .env
+# .env — never commit this file
 ANTHROPIC_API_KEY=sk-ant-your-key-here
 OPENAI_API_KEY=sk-your-openai-key-here
 MILVUS_HOST=localhost
 MILVUS_PORT=19530
-TAVILY_API_KEY=tvly-your-key-here
+TAVILY_API_KEY=tvly-your-key-here   # optional
 ```
 
-Add `.env` to `.gitignore`:
-
-```bash
-echo ".env" >> .gitignore
-echo "venv/" >> .gitignore
-echo "__pycache__/" >> .gitignore
-```
+> `.env` and `venv/` are already in the root `.gitignore` — you do not need to add them manually.
 
 ---
 

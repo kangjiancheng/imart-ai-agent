@@ -39,13 +39,13 @@ NestJS
 
 ## Endpoints
 
-| Method | Path | Description |
-|--------|------|-------------|
-| `POST` | `/v1/agent/chat` | Main streaming endpoint. Returns SSE token stream. |
-| `POST` | `/v1/rag/ingest` | Upload a document to the knowledge base. Returns `job_id`. |
-| `GET` | `/v1/rag/ingest/{job_id}` | Poll ingestion job status (`queued` / `processing` / `done` / `error`). |
-| `GET` | `/health` | Health check for load balancers and deployment probes. |
-| `GET` | `/docs` | Interactive Swagger UI (auto-generated). |
+| Method | Path                      | Description                                                             |
+| ------ | ------------------------- | ----------------------------------------------------------------------- |
+| `POST` | `/v1/agent/chat`          | Main streaming endpoint. Returns SSE token stream.                      |
+| `POST` | `/v1/rag/ingest`          | Upload a document to the knowledge base. Returns `job_id`.              |
+| `GET`  | `/v1/rag/ingest/{job_id}` | Poll ingestion job status (`queued` / `processing` / `done` / `error`). |
+| `GET`  | `/health`                 | Health check for load balancers and deployment probes.                  |
+| `GET`  | `/docs`                   | Interactive Swagger UI (auto-generated).                                |
 
 ### Request body — `POST /v1/agent/chat`
 
@@ -239,11 +239,11 @@ Dependency direction always flows inward — `routers` calls `agent_loop`, `agen
 
 Every message passes through three checks **before** Claude sees anything. All checks are regex-based — no LLM call, < 1ms total.
 
-| Step | File | What it does | On fail |
-|------|------|-------------|---------|
-| 1 | `content_policy.py` | Blocks harmful requests (weapons, hacking, etc.) | 422 error |
-| 2 | `pii_filter.py` | Redacts email, phone, SSN, credit card numbers | Never blocks — cleans message |
-| 3 | `injection_detector.py` | Blocks prompt injection attempts | 422 error |
+| Step | File                    | What it does                                     | On fail                       |
+| ---- | ----------------------- | ------------------------------------------------ | ----------------------------- |
+| 1    | `content_policy.py`     | Blocks harmful requests (weapons, hacking, etc.) | 422 error                     |
+| 2    | `pii_filter.py`         | Redacts email, phone, SSN, credit card numbers   | Never blocks — cleans message |
+| 3    | `injection_detector.py` | Blocks prompt injection attempts                 | 422 error                     |
 
 ---
 
@@ -252,7 +252,8 @@ Every message passes through three checks **before** Claude sees anything. All c
 Documents are ingested via `POST /v1/rag/ingest` and stored in the Milvus `knowledge_base` collection. At query time, the agent embeds the user's message and retrieves the most semantically similar chunks (score ≥ 0.72).
 
 **Ingestion flow:**
-```
+
+```text
 File upload → decode UTF-8 → chunk (RecursiveCharacterTextSplitter)
   → embed each chunk (OpenAI) → store in Milvus knowledge_base
 ```
@@ -269,29 +270,87 @@ Per-user facts are stored in the Milvus `user_memory` collection, filtered by `u
 
 ---
 
-## Setup
+## Project Setup
 
-**1. Copy and fill in environment variables**
+### Prerequisites
+
+Make sure these are installed on your machine before starting:
+
+- **pyenv** — Python version manager (`brew install pyenv` on macOS)
+- **Docker** — required to run Milvus (vector database)
+
+### 1. Enter the project folder
 
 ```bash
-cp .env.example .env
+cd app-ai
 ```
 
-| Variable | Required | Description |
-|----------|----------|-------------|
-| `ANTHROPIC_API_KEY` | Yes | Claude API key from console.anthropic.com |
-| `OPENAI_API_KEY` | Yes | OpenAI key for embeddings (text-embedding-3-small) |
-| `MILVUS_HOST` | No | Milvus host (default: `localhost`) |
-| `MILVUS_PORT` | No | Milvus port (default: `19530`) |
-| `TAVILY_API_KEY` | No | Tavily search API key — web search is disabled if missing |
+### 2. Install and pin the Python version
 
-**2. Install dependencies**
+**Option A**, install by the pyenv, like the nvm in the web node.js switch the node version.
+
+```bash
+pyenv install 3.11.9    # skip if already installed
+pyenv local 3.11.9      # writes .python-version — commit this file
+python --version        # → Python 3.11.9
+```
+
+**Option B**, install by the brew directly, then update the path in the shell profile:
+
+```bash
+brew install python@3.12
+```
+
+then, update the shell profile
+
+```bash
+# Add this to ~/.zshrc
+echo 'export PATH="/opt/homebrew/opt/python@3.12/libexec/bin:$PATH"' >> ~/.zshrc
+source ~/.zshrc
+
+python --version    # → Python 3.12.13
+```
+
+### 3. Create and activate a virtual environment
+
+A virtual environment is like `node_modules` — it keeps this project's packages isolated from everything else on your machine.
+
+```bash
+python -m venv venv
+source venv/bin/activate      # macOS / Linux — prompt changes to (venv)
+# venv\Scripts\activate       # Windows
+```
+
+exit the virtual environment:
+
+```bash
+deactivate
+```
+
+> **Always activate venv before running `pip` or `python`.** If you forget, packages install globally and projects conflict.
+
+### 4. Install dependencies
 
 ```bash
 pip install -r requirements.txt
 ```
 
-**3. Start Milvus (via Docker)**
+### 5. Set up environment variables
+
+```bash
+cp .env.example .env
+# Open .env and fill in your API keys
+```
+
+| Variable            | Required | Description                                               |
+| ------------------- | -------- | --------------------------------------------------------- |
+| `ANTHROPIC_API_KEY` | Yes      | Claude API key from console.anthropic.com                 |
+| `OPENAI_API_KEY`    | Yes      | OpenAI key for embeddings (text-embedding-3-small)        |
+| `MILVUS_HOST`       | No       | Milvus host (default: `localhost`)                        |
+| `MILVUS_PORT`       | No       | Milvus port (default: `19530`)                            |
+| `TAVILY_API_KEY`    | No       | Tavily search API key — web search is disabled if missing |
+
+### 6. Start Milvus (vector database, via Docker)
 
 ```bash
 docker run -d --name milvus \
@@ -299,13 +358,23 @@ docker run -d --name milvus \
   milvusdb/milvus:latest standalone
 ```
 
-**4. Run the server**
+### 7. Run the server
 
 ```bash
 uvicorn src.main:app --reload --port 8000
 ```
 
 Server starts at `http://localhost:8000`. Swagger UI at `http://localhost:8000/docs`.
+
+---
+
+### Daily workflow (after first-time setup)
+
+```bash
+cd app-ai
+source venv/bin/activate
+uvicorn src.main:app --reload --port 8000
+```
 
 ---
 

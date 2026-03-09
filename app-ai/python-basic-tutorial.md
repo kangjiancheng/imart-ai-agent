@@ -9,6 +9,14 @@ Each section explains one Python concept with comparisons to JS/TS equivalents.
 
 - [Python Quick Starts](#python-quick-starts)
   - [Table of Contents](#table-of-contents)
+  - [0. Project setup — prerequisites and launch](#0-project-setup--prerequisites-and-launch)
+    - [0.1 pyenv — Python version manager](#01-pyenv--python-version-manager)
+    - [0.2 venv — virtual environment](#02-venv--virtual-environment)
+    - [0.3 pip — package manager](#03-pip--package-manager)
+    - [0.4 .env — environment variables](#04-env--environment-variables)
+    - [0.5 uvicorn — ASGI server (how you launch the app)](#05-uvicorn--asgi-server-how-you-launch-the-app)
+    - [0.6 Full setup sequence (run top to bottom, once)](#06-full-setup-sequence-run-top-to-bottom-once)
+    - [0.7 Tool summary](#07-tool-summary)
   - [1. Project structure — `__init__.py`](#1-project-structure--__init__py)
   - [2. Variables and types](#2-variables-and-types)
   - [3. f-strings — template literals](#3-f-strings--template-literals)
@@ -28,6 +36,229 @@ Each section explains one Python concept with comparisons to JS/TS equivalents.
   - [17. `...` Ellipsis — required field marker](#17--ellipsis--required-field-marker)
   - [18. `"""` Triple quotes — multi-line strings](#18--triple-quotes--multi-line-strings)
   - [19. Quick comparison table](#19-quick-comparison-table)
+
+---
+
+## 0. Project setup — prerequisites and launch
+
+Before running any Python project, you need four things: the right Python version, an isolated environment, installed packages, and environment variables. Here is each tool, what it does, and why you need it — compared to the Node.js toolchain you already know.
+
+---
+
+### 0.1 pyenv — Python version manager
+
+**What it is:** Installs and switches between Python versions per project.
+
+**JS/TS equivalent:** `nvm` (Node Version Manager)
+
+```bash
+# Install pyenv (macOS)
+brew install pyenv
+
+# Install a specific Python version
+pyenv install 3.11.9
+
+# Set the version for this project folder only
+pyenv local 3.11.9     # writes a .python-version file — git-commit this
+
+# Verify
+python --version        # → Python 3.11.9
+```
+
+**Why you need it:** Your system Python is often outdated or used by the OS itself. `pyenv` lets you pin a version per project without touching the system Python — exactly like `.nvmrc` + `nvm use`.
+
+| pyenv             | nvm                  |
+| ----------------- | -------------------- |
+| `pyenv install`   | `nvm install`        |
+| `pyenv local X`   | `.nvmrc` + `nvm use` |
+| `.python-version` | `.nvmrc`             |
+
+---
+
+### 0.2 venv — virtual environment
+
+**What it is:** Creates an isolated folder (`venv/`) where packages are installed for this project only.
+
+**JS/TS equivalent:** `node_modules/` — but in Node every project already gets its own `node_modules`. In Python, packages install globally by default unless you create a venv first.
+
+```bash
+# Create the virtual environment (run once per project)
+python -m venv venv
+#               ^^^^
+#               folder name — conventionally "venv" or ".venv"
+
+# Activate it — your shell prompt will show (venv) prefix
+source venv/bin/activate        # macOS / Linux
+# venv\Scripts\activate         # Windows
+
+# Deactivate when done
+deactivate
+```
+
+**Why you need it:** Without activation, `pip install` puts packages into a global Python folder shared by every project on your machine — version conflicts become guaranteed. With venv, each project has its own isolated site-packages.
+
+```
+# Project layout after venv creation:
+app-ai/
+├── venv/              ← isolated Python + packages (git-ignore this)
+│   ├── bin/python
+│   └── lib/site-packages/
+├── src/
+└── requirements.txt
+```
+
+> **Always add `venv/` to `.gitignore`.** It is like `node_modules/` — never commit it.
+
+---
+
+### 0.3 pip — package manager
+
+**What it is:** Installs Python packages from PyPI (Python Package Index).
+
+**JS/TS equivalent:** `npm` or `yarn` or `bun`
+
+```bash
+# Install a single package
+pip install fastapi
+
+# Install everything listed in requirements.txt
+pip install -r requirements.txt
+
+# See what is installed (like npm list)
+pip list
+
+# Save current environment to requirements.txt
+pip freeze > requirements.txt
+```
+
+**`requirements.txt` vs `package.json`:**
+
+| Python                  | Node.js                             |
+| ----------------------- | ----------------------------------- |
+| `requirements.txt`      | `package.json` (dependencies only)  |
+| `pip install -r req...` | `npm install`                       |
+| `pip freeze > req...`   | auto-updated by `npm install <pkg>` |
+| no lock file by default | `package-lock.json` / `yarn.lock`   |
+
+> **Tip:** `pip freeze` pins exact versions (e.g. `fastapi==0.111.0`). Commit this file so teammates install the exact same versions.
+
+**This project's `requirements.txt`:**
+
+```text
+fastapi
+uvicorn[standard]
+langchain-anthropic
+langchain-core
+pydantic-settings
+pymilvus
+openai
+python-dotenv
+```
+
+---
+
+### 0.4 .env — environment variables
+
+**What it is:** A file containing secret API keys and config values that should not be committed to git.
+
+**JS/TS equivalent:** `.env` loaded by `dotenv` — identical concept.
+
+```bash
+# Copy the template, then fill in your real keys
+cp .env.example .env
+```
+
+```dotenv
+# .env
+ANTHROPIC_API_KEY=sk-ant-...
+OPENAI_API_KEY=sk-...
+TAVILY_API_KEY=tvly-...
+MILVUS_HOST=localhost
+MILVUS_PORT=19530
+```
+
+**How Python reads it:** This project uses `pydantic-settings` (see [section 15](#15-pydantic--validation-and-settings)). It reads `.env` automatically when `Settings()` is instantiated — no `require('dotenv').config()` call needed.
+
+> **Always add `.env` to `.gitignore`.** Commit `.env.example` with placeholder values instead.
+
+---
+
+### 0.5 uvicorn — ASGI server (how you launch the app)
+
+**What it is:** The production-grade server that runs FastAPI apps. Handles HTTP, async I/O, and hot-reload for development.
+
+**JS/TS equivalent:** `node server.js` or `ts-node` — the runtime that actually serves requests.
+
+```bash
+# Development — hot-reload on file save
+uvicorn src.main:app --reload --port 8000
+#        ^^^^^^^^^  ^^^
+#        module     FastAPI app object inside that module
+#        path       (src/main.py → `app = FastAPI()`)
+
+# Production — multiple workers, no reload
+uvicorn src.main:app --workers 4 --port 8000
+```
+
+**Why `src.main:app` not `src/main.py`?**
+
+Python uses dot-separated module paths, not file paths. `src.main` means "the `main` module inside the `src` package." The `:app` after the colon tells uvicorn which variable inside that module is the FastAPI instance.
+
+```python
+# src/main.py
+from fastapi import FastAPI
+app = FastAPI()   # ← uvicorn looks for this name
+```
+
+---
+
+### 0.6 Full setup sequence (run top to bottom, once)
+
+```bash
+# 1. Clone the repo and enter the project
+cd app-ai
+
+# 2. Install the right Python version
+pyenv install 3.11.9    # if not already installed
+pyenv local 3.11.9
+
+# 3. Create and activate the virtual environment
+python -m venv venv
+source venv/bin/activate     # prompt changes to (venv)
+
+# 4. Install dependencies
+pip install -r requirements.txt
+
+# 5. Set up environment variables
+cp .env.example .env
+# → open .env and fill in your API keys
+
+# 6. Launch the server
+uvicorn src.main:app --reload --port 8000
+# → http://localhost:8000
+# → http://localhost:8000/docs  (auto-generated API docs)
+```
+
+**After the first setup**, your daily workflow is just:
+
+```bash
+cd app-ai
+source venv/bin/activate
+uvicorn src.main:app --reload --port 8000
+```
+
+---
+
+### 0.7 Tool summary
+
+| Tool               | Role                         | JS/TS equivalent     |
+| ------------------ | ---------------------------- | -------------------- |
+| `pyenv`            | Manage Python versions       | `nvm`                |
+| `venv`             | Isolate packages per project | `node_modules` scope |
+| `pip`              | Install packages             | `npm install`        |
+| `requirements.txt` | List dependencies            | `package.json`       |
+| `.env`             | Secret config values         | `.env` + `dotenv`    |
+| `uvicorn`          | Serve the FastAPI app        | `node` / `ts-node`   |
 
 ---
 
