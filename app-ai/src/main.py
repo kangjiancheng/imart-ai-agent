@@ -43,6 +43,9 @@ from src.routers.rag import router as rag_router
 # Import the RAG router from routers/rag.py.
 # rag_router contains POST /v1/rag/ingest and GET /v1/rag/ingest/{job_id}.
 
+from src.config.settings import settings
+# settings = the validated config object (reads .env). Used here to expose model info in /info.
+
 
 # ── FastAPI app creation ────────────────────────────────────────────────────
 # PYTHON CONCEPT — named arguments (keyword arguments):
@@ -144,3 +147,30 @@ async def health():
     return {"status": "ok", "service": "app-ai"}
     # FastAPI converts this dict to HTTP 200 JSON response:
     # {"status": "ok", "service": "app-ai"}
+
+
+# ── Info endpoint ─────────────────────────────────────────────────────────────
+# Returns the current model configuration — useful for debugging which model
+# is active without having to check .env or ask the agent directly.
+
+@app.get("/info")
+async def info():
+    """
+    Returns current service configuration, including which Claude model is active.
+    Call this to verify which model the agent is using before sending a chat request.
+
+    Example response:
+      {
+        "service": "app-ai",
+        "claude_model": "claude-sonnet-4-6",
+        "claude_max_tokens": 4096,
+        "embedding_model": "text-embedding-3-small"
+      }
+    """
+    return {
+        "service": "app-ai",
+        "claude_model": settings.claude_model,
+        "claude_max_tokens": settings.claude_max_tokens,
+        "embedding_model": settings.embedding_model,
+    }
+

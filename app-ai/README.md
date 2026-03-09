@@ -75,6 +75,12 @@ data:  30 days of purchase.
 data: [DONE]
 ```
 
+### Testing the agent chat endpoint
+
+**Option 1 — Swagger UI (easiest)**
+
+Visit `http://127.0.0.1:8000/docs` in your browser → click `POST /v1/agent/chat` → click **Try it out**.
+
 ---
 
 ## Project structure
@@ -364,7 +370,17 @@ docker run -d --name milvus \
 uvicorn src.main:app --reload --port 8000
 ```
 
-Server starts at `http://localhost:8000`. Swagger UI at `http://localhost:8000/docs`.
+Server starts at `http://localhost:8000`.
+
+| URL                                        | What it does                                    |
+| ------------------------------------------ | ----------------------------------------------- |
+| `http://127.0.0.1:8000/docs`               | Interactive Swagger UI — try all endpoints here |
+| `http://127.0.0.1:8000/redoc`              | ReDoc API reference                             |
+| `http://127.0.0.1:8000/health`             | Returns `{"status": "ok", "service": "app-ai"}` |
+| `POST http://127.0.0.1:8000/v1/agent/chat` | Main agent endpoint                             |
+| `POST http://127.0.0.1:8000/v1/rag/ingest` | RAG ingest endpoint                             |
+
+> Start with `/docs` — it gives you a full interactive UI to test the API directly from the browser without needing Postman or curl.
 
 ---
 

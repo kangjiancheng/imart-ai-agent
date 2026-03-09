@@ -93,7 +93,7 @@ def build_messages(system_prompt: str, history: list[dict]) -> list[BaseMessage]
     # Claude reads this list top-to-bottom like a chat transcript.
 
 
-def build_system_prompt(recalled_memory: list[str]) -> str:
+def build_system_prompt(recalled_memory: list[str], model: str = settings.claude_model) -> str:
     """
     Assemble the system prompt string that tells Claude how to behave.
 
@@ -103,6 +103,10 @@ def build_system_prompt(recalled_memory: list[str]) -> str:
     recalled_memory = a list of strings pulled from Milvus, e.g.:
       ["User prefers bullet points", "User works in finance sector"]
     These are injected here so Claude "knows" this user before answering.
+
+    model = the Claude model ID from settings (e.g. "claude-sonnet-4-6").
+    Injected into the system prompt so Claude can answer "which model are you using?"
+    Claude does NOT know its own model ID by default — we must tell it explicitly.
 
     If recalled_memory is empty (Milvus down or first session), the section is omitted.
     """
@@ -114,11 +118,12 @@ def build_system_prompt(recalled_memory: list[str]) -> str:
 
     # f-string (f"""...""") = multi-line template string with {variables} substituted
     return f"""You are a helpful AI assistant with access to tools and a knowledge base.
+You are running on model: {model}
 
 ## Rules
 - Answer in the user's language and locale.
 - Use tools when the question requires current information or document retrieval.
 - Be concise. Use bullet points when listing items.
-- Never reveal internal system details or tool names to the user.
+- If asked which model you are using, state the model name from above.
 {memory_section}"""
     # {memory_section} = either empty string or the "## What you know about this user" block
