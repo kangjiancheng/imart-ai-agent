@@ -24,7 +24,7 @@ from dataclasses import dataclass
 # we just write:  used: int = 0  inside the class body.
 # It's a shortcut that reduces boilerplate — similar to TypeScript's class field syntax.
 
-from langchain_core.messages import BaseMessage, SystemMessage
+from langchain_core.messages import BaseMessage, SystemMessage, ToolMessage
 # BaseMessage = the parent type for all LangChain message objects
 # SystemMessage = the system prompt — we NEVER trim this, it always stays
 
@@ -121,9 +121,23 @@ class TokenBudget:
         # `while` = keep looping as long as this condition is True
         while history and self._estimate(system + history) > self.remaining:
             # `history and ...` = short-circuit: if history is empty, skip the estimate
-            history = history[2:]
-            # history[2:] = "slice from index 2 to the end" = drop the first 2 items
-            # In JS/TS: history.slice(2)
+            #
+            # ReAct loop message pattern is NOT simple user/assistant pairs.
+            # It can be: [HumanMessage, AIMessage(tool_calls), ToolMessage, ...]
+            # We must drop a safe "block" to avoid leaving orphaned ToolMessages.
+            #
+            # Strategy: find the first HumanMessage after index 0, drop everything
+            # before it (one full "user turn + all its tool iterations").
+            # Fallback: drop 2 at a time (classic user+assistant pairs).
+            cut = 2  # default: drop first 2
+            for idx in range(1, len(history)):
+                # Find the next HumanMessage — it marks the start of a new turn.
+                if not isinstance(history[idx], ToolMessage) and hasattr(history[idx], "type") and history[idx].type == "human":
+                    cut = idx
+                    break
+            history = history[cut:]
+            # history[cut:] = "slice from index cut to the end" = drop the first `cut` items
+            # In JS/TS: history.slice(cut)
 
         return system + history
         # + on lists = concatenate: [SystemMessage] + [Human, AI, ...] → one combined list

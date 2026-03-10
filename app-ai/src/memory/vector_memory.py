@@ -116,13 +116,21 @@ class VectorMemory:
             )
 
             # Create the collection on first use if it doesn't exist yet.
+            # Use explicit schema — pymilvus 2.6.x shorthand ignores auto_id=True.
             if not client.has_collection(self.COLLECTION):
+                from pymilvus import DataType
+                schema = MilvusClient.create_schema(
+                    auto_id=True,
+                    enable_dynamic_field=True,
+                )
+                schema.add_field("id", DataType.INT64, is_primary=True, auto_id=True)
+                schema.add_field("vector", DataType.FLOAT_VECTOR, dim=EmbeddingClient.DIMENSIONS)
+                index_params = client.prepare_index_params()
+                index_params.add_index(field_name="vector", metric_type="COSINE")
                 client.create_collection(
                     collection_name=self.COLLECTION,
-                    dimension=1536,
-                    enable_dynamic_field=True,
-                    # Dynamic fields store user_id, content, tags, created_at
-                    # without needing a strict schema definition.
+                    schema=schema,
+                    index_params=index_params,
                 )
 
             # Step 1: Embed the current query to find relevant memories.
@@ -211,11 +219,21 @@ class VectorMemory:
             )
 
             # Create the collection on first use if it doesn't exist yet.
+            # Use explicit schema — pymilvus 2.6.x shorthand ignores auto_id=True.
             if not client.has_collection(self.COLLECTION):
+                from pymilvus import DataType
+                schema = MilvusClient.create_schema(
+                    auto_id=True,
+                    enable_dynamic_field=True,
+                )
+                schema.add_field("id", DataType.INT64, is_primary=True, auto_id=True)
+                schema.add_field("vector", DataType.FLOAT_VECTOR, dim=EmbeddingClient.DIMENSIONS)
+                index_params = client.prepare_index_params()
+                index_params.add_index(field_name="vector", metric_type="COSINE")
                 client.create_collection(
                     collection_name=self.COLLECTION,
-                    dimension=1536,
-                    enable_dynamic_field=True,
+                    schema=schema,
+                    index_params=index_params,
                 )
 
             # Step 1: Embed the memory content for vector storage.

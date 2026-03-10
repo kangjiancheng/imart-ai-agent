@@ -35,6 +35,11 @@ from fastapi.responses import StreamingResponse
 # Instead of returning one big JSON body, it sends pieces one at a time.
 # The client receives each piece immediately as it's yielded.
 
+import json
+# json = Python's built-in module for encoding/decoding JSON.
+# json.dumps({"type": "token", "content": "Hello"}) → '{"type": "token", "content": "Hello"}'
+# Used here to format each SSE event as a typed JSON object.
+
 from src.schemas.request import AgentRequest
 # AgentRequest = Pydantic model for the incoming JSON body.
 # FastAPI uses it to validate the request automatically.
@@ -145,17 +150,17 @@ async def agent_chat(request: AgentRequest):
 
             if token:
                 # Skip empty strings (Claude's streaming API sometimes yields "")
-                yield f"data: {token}\n\n"
-                # PYTHON CONCEPT — f-string + \n:
-                #   f"data: {token}\n\n"
-                #   Formats the token as an SSE event line.
-                #   \n = newline, \n\n = two newlines (required by SSE protocol).
-                #   SSE format: "data: <content>\n\n"
-                #   The client reads everything after "data: " as the event data.
+                yield f"data: {json.dumps({'type': 'token', 'content': token})}\n\n"
+                # SSE event format: "data: <JSON>\n\n"
+                # Typed JSON format so NestJS can distinguish tokens from control events:
+                #   {"type": "token", "content": "Hello"}  ← text to display
+                #   {"type": "done"}                       ← stream finished
+                #   {"type": "error", "message": "..."}    ← something went wrong
+                # NestJS reads the "type" field to decide what to do with each event.
 
-        yield "data: [DONE]\n\n"
-        # After all tokens are sent, yield the sentinel value "[DONE]".
-        # NestJS (the client) watches for this to know the stream has ended.
+        yield f"data: {json.dumps({'type': 'done'})}\n\n"
+        # After all tokens are sent, yield the "done" sentinel event.
+        # NestJS (the client) watches for type == "done" to know the stream has ended.
         # Without this, the client wouldn't know when to stop reading.
 
     # ── Step 4: Return a StreamingResponse wrapping the generator ────────────

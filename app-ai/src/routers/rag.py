@@ -143,10 +143,26 @@ async def ingest_document(
 
             # Create the collection if it doesn't exist yet (Milvus Lite on first ingest).
             if not client.has_collection(settings.milvus_collection_knowledge):
+                from src.rag.embeddings import EmbeddingClient as _EC
+                from pymilvus import DataType
+
+                # Use explicit schema so auto_id=True is guaranteed.
+                # The simple create_collection(dimension=...) shorthand ignores auto_id
+                # in pymilvus 2.6.x, causing: "Insert missed an field `id`".
+                schema = MilvusClient.create_schema(
+                    auto_id=True,
+                    enable_dynamic_field=True,
+                )
+                schema.add_field("id", DataType.INT64, is_primary=True, auto_id=True)
+                schema.add_field("vector", DataType.FLOAT_VECTOR, dim=_EC.DIMENSIONS)
+
+                index_params = client.prepare_index_params()
+                index_params.add_index(field_name="vector", metric_type="COSINE")
+
                 client.create_collection(
                     collection_name=settings.milvus_collection_knowledge,
-                    dimension=1536,
-                    enable_dynamic_field=True,
+                    schema=schema,
+                    index_params=index_params,
                 )
 
             # Step 8: For each chunk, embed it and store it in Milvus.
@@ -156,8 +172,7 @@ async def ingest_document(
                 #   In TypeScript: for (const chunk of chunks)
 
                 vector = await embedder.embed(chunk)
-                # Convert this text chunk to a 1536-float embedding vector.
-                # await pauses until OpenAI returns the embedding.
+                # Convert this text chunk to a 1024-float embedding vector (BGE-M3).
 
                 client.insert(
                     collection_name=settings.milvus_collection_knowledge,

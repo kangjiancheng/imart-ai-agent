@@ -60,7 +60,7 @@ class Settings(BaseSettings):
     # (~10s startup, ~1GB RAM with fp16). See src/rag/embeddings.py.
 
     # ── Milvus vector database ────────────────────────────────────────────────
-    milvus_uri: str = "./milvus_local.db"
+    milvus_uri: str # = "./milvus_local.db"
     # milvus_uri: str # No default = REQUIRED. App won't start if MILVUS_URI is missing from .env
     # The milvus_uri from .env variable MILVUS_URI overrides this default.
     # milvus_uri: str = "./milvus_local.db": use Milvus Lite automatically" which lets the app work out of the box without any .env configuration.

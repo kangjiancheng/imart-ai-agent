@@ -180,14 +180,28 @@ async def run(request: AgentRequest):
             # Empty tool_calls list means Claude is done reasoning.
             # It has enough information to write the final answer.
             # Now we STREAM the final answer token-by-token to the browser.
-            async for chunk in llm.astream(messages):
-                # astream() = "async stream" — yields tiny AIMessageChunk objects
-                # Each chunk.content is typically 1-4 words — Claude generates them
-                # as it "types", like a human writing progressively.
-                if chunk.content:
-                    yield chunk.content
-                    # Each yield sends one small piece of text to the browser immediately.
-                    # This is how the user sees the answer building up word-by-word.
+            #
+            # IMPORTANT: use planner.astream (not llm.astream) so the same tool
+            # definitions are present. Using bare llm caused the Anthropic API to
+            # reject messages containing tool_use/tool_result history blocks.
+            # Do NOT append `response` here — the conversation must end with a
+            # user message (or ToolMessage). Appending AIMessage causes
+            # "assistant message prefill" error on models that don't support it.
+            async for chunk in planner.astream(messages):
+                # When tools are bound, chunk.content can be either:
+                #   - str: plain text (no tools used)
+                #   - list: content blocks e.g. [{'type': 'text', 'text': '...', 'index': 0}]
+                # We must handle both formats to extract the text correctly.
+                content = chunk.content
+                if isinstance(content, str):
+                    if content:
+                        yield content
+                elif isinstance(content, list):
+                    for block in content:
+                        if isinstance(block, dict) and block.get("type") == "text":
+                            text = block.get("text", "")
+                            if text:
+                                yield text
             break
             # After streaming the full answer, exit the loop — we're done.
 

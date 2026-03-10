@@ -114,15 +114,19 @@ class RAGRetriever:
             # Milvus Lite does not auto-create collections — we create it here on first use.
             # `has_collection()` returns True/False without raising an exception.
             if not client.has_collection(settings.milvus_collection_knowledge):
+                from pymilvus import DataType
+                schema = MilvusClient.create_schema(
+                    auto_id=True,
+                    enable_dynamic_field=True,
+                )
+                schema.add_field("id", DataType.INT64, is_primary=True, auto_id=True)
+                schema.add_field("vector", DataType.FLOAT_VECTOR, dim=EmbeddingClient.DIMENSIONS)
+                index_params = client.prepare_index_params()
+                index_params.add_index(field_name="vector", metric_type="COSINE")
                 client.create_collection(
                     collection_name=settings.milvus_collection_knowledge,
-                    dimension=1536,
-                    # 1536 = the output size of text-embedding-3-small.
-                    # This MUST match the embedding model's output dimension.
-                    enable_dynamic_field=True,
-                    # enable_dynamic_field=True: allows inserting any extra fields
-                    # (like "content" and "source") without defining a strict schema.
-                    # Those fields are stored as a JSON blob alongside the vector.
+                    schema=schema,
+                    index_params=index_params,
                 )
 
             # Step 1: Convert the user's query text to a vector.
