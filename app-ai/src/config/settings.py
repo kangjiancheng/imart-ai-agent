@@ -54,15 +54,10 @@ class Settings(BaseSettings):
     # 4096 ≈ ~3,000 words — more than enough for most agent responses.
 
     # ── Embeddings ────────────────────────────────────────────────────────────
-    openai_api_key: str = ""
-    # Used for text-embedding-3-small (to create vectors for RAG + memory search).
-    # Claude does NOT provide embeddings — we use OpenAI's embedding model separately.
-    # Empty string default = optional (RAG/memory won't work without it, but agent runs).
-
-    embedding_model: str = "text-embedding-3-small"
-    # OpenAI's fast, cheap embedding model. Produces 1536-dimensional vectors.
-    # "1536-dimensional" = each piece of text becomes a list of 1536 numbers
-    # that captures its meaning. Similar texts have similar numbers.
+    # Using BAAI/bge-m3 (local, free, multilingual) — no API key needed.
+    # The model runs entirely on this machine; no external service is called.
+    # Model is loaded once at server startup from the HuggingFace cache
+    # (~10s startup, ~1GB RAM with fp16). See src/rag/embeddings.py.
 
     # ── Milvus vector database ────────────────────────────────────────────────
     milvus_uri: str = "./milvus_local.db"

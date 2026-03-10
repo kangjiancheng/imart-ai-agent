@@ -283,7 +283,9 @@ Per-user facts are stored in the Milvus `user_memory` collection, filtered by `u
 Make sure these are installed on your machine before starting:
 
 - **pyenv** — Python version manager (`brew install pyenv` on macOS)
-- **Docker** — required to run Milvus (vector database)
+- **Docker** — required if using Docker Milvus (Option B in step 6)
+- **~4GB free disk space** — BGE-M3 model weights (~2.3GB) are downloaded on first run and cached at `~/.cache/modelscope/hub/models/BAAI/bge-m3/`
+- **~2GB free RAM** — BGE-M3 loads into memory at server startup (uses ~1GB with fp16)
 
 ### 1. Enter the project folder
 
@@ -341,7 +343,65 @@ deactivate
 pip install -r requirements.txt
 ```
 
-### 5. Set up environment variables
+### 5. Download the BGE-M3 embedding model
+
+BGE-M3 (~2.3GB) powers the vector search. Download it **before** starting the server. The current implementation uses **ModelScope SDK** (Option 1) — download once, loads from local cache on every server start.
+
+**Option 1 — ModelScope SDK (current implementation, confirmed working):**
+
+```bash
+pip install modelscope   # already in requirements.txt
+```
+
+```python
+# Download once — run this script or just start the server (it downloads automatically)
+from modelscope import snapshot_download
+model_dir = snapshot_download('BAAI/bge-m3')
+print(f'Cached at: {model_dir}')
+# → ~/.cache/modelscope/hub/models/BAAI/bge-m3
+```
+
+Or use the CLI:
+
+```bash
+modelscope download --model BAAI/bge-m3
+```
+
+After the first download, `snapshot_download()` in `src/rag/embeddings.py` returns the local cache path instantly — no network calls on subsequent server starts.
+
+**Option 2 — Ollama (alternative, no Python model deps):**
+
+_Local machine:_
+
+```bash
+brew install ollama        # macOS
+# Ollama starts automatically — if you see "address already in use" it is already running
+ollama pull bge-m3
+
+# Verify
+curl http://localhost:11434/api/embeddings \
+  -d '{"model": "bge-m3", "prompt": "test"}'
+# → {"embedding": [...]}
+```
+
+_Docker Compose_ — use the combined `docker-compose.yml` in Step 6 below, which starts Ollama and Milvus together.
+
+> **Ollama note:** Dense vectors only, input truncated to 4,096 tokens. Switching to Ollama requires updating `src/rag/embeddings.py` — see [docs/agent-rag-embeddings.md](../docs/agent-rag-embeddings.md) for the Ollama variant code.
+
+**Option 3 — HuggingFace** (if `huggingface.co` is accessible):
+
+```bash
+python -c "
+from FlagEmbedding import BGEM3FlagModel
+BGEM3FlagModel('BAAI/bge-m3', use_fp16=True)
+print('Done.')
+"
+```
+
+> If `huggingface.co` is blocked or slow, use Option 1 (ModelScope) instead. See [docs/agent-rag-embeddings.md](../docs/agent-rag-embeddings.md) for full troubleshooting.
+
+
+### 6. Set up environment variables
 
 ```bash
 cp .env.example .env
@@ -356,9 +416,9 @@ cp .env.example .env
 | `MILVUS_TOKEN`      | No       | Milvus auth token `user:password` (only for Docker Milvus) |
 | `TAVILY_API_KEY`    | No       | Tavily search API key — web search is disabled if missing  |
 
-### 6. Start Milvus (vector database)
+### 6. Start infrastructure (Milvus + Ollama)
 
-**Option A — Milvus Lite (recommended for local dev, no Docker needed)**
+**Option A — Milvus Lite (local dev, no Docker needed)**
 
 No setup required. Set in `.env`:
 
@@ -366,20 +426,50 @@ No setup required. Set in `.env`:
 MILVUS_URI=./milvus_local.db
 ```
 
-A local `.db` file is created automatically on first use.
+A local `.db` file is created automatically on first use. No Ollama needed for this option — use the FlagEmbedding or HuggingFace download options in Step 5.
 
-**Option B — Docker Milvus (for production-like setup)**
+**Option B — Docker Compose (Milvus + Ollama together)**
+
+Create a `docker-compose.yml` in the `app-ai/` directory:
+
+```yaml
+services:
+  milvus:
+    image: milvusdb/milvus:v2.4.0
+    command: milvus run standalone
+    environment:
+      ETCD_USE_EMBED: "true"
+      ETCD_DATA_DIR: /var/lib/milvus/etcd
+      COMMON_STORAGETYPE: local
+    ports:
+      - "19530:19530"
+      - "9091:9091"
+    volumes:
+      - milvus_data:/var/lib/milvus
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9091/healthz"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  ollama:
+    image: ollama/ollama
+    ports:
+      - "11434:11434"
+    volumes:
+      - ollama_data:/root/.ollama # BGE-M3 model persists across restarts
+
+volumes:
+  milvus_data:
+  ollama_data:
+```
 
 ```bash
-# Download the official setup script
-curl -sfL https://raw.githubusercontent.com/milvus-io/milvus/master/scripts/standalone_embed.sh -o standalone_embed.sh
+# Start both services
+docker compose up -d
 
-# Start Milvus (enter your Mac login password when prompted)
-bash standalone_embed.sh start
-
-# Stop / delete
-bash standalone_embed.sh stop
-bash standalone_embed.sh delete
+# Pull BGE-M3 into the Ollama container (run once — ~2.3GB)
+docker exec -it ollama ollama pull bge-m3
 ```
 
 Then set in `.env`:
@@ -387,6 +477,14 @@ Then set in `.env`:
 ```
 MILVUS_URI=http://localhost:19530
 MILVUS_TOKEN=root:Milvus
+```
+
+```bash
+# Stop
+docker compose down
+
+# Stop and remove all data
+docker compose down -v
 ```
 
 ### 7. Run the server
@@ -435,6 +533,61 @@ uvicorn src.main:app --reload --port 8000
 ```bash
 pytest tests/
 ```
+
+---
+
+## Dependencies
+
+`requirements.txt` was generated with `pip freeze`, which dumps every installed package — including packages that were pulled in automatically. Here is a breakdown of what was **manually installed** vs what came along for the ride.
+
+### What you install manually
+
+These are the only packages you need to `pip install` directly. Everything else in `requirements.txt` is a transitive dependency pulled in by one of these.
+
+| Package                    | Version pinned | What it does                                                                        |
+| -------------------------- | -------------- | ----------------------------------------------------------------------------------- |
+| `fastapi`                  | 0.135.1        | Web framework — defines HTTP routes, validates request bodies, generates Swagger UI |
+| `uvicorn`                  | 0.41.0         | ASGI server — runs the FastAPI app (`uvicorn src.main:app`)                         |
+| `pydantic-settings`        | 2.13.1         | Reads `.env` file into typed Python settings (`BaseSettings`)                       |
+| `langchain-anthropic`      | 1.3.4          | `ChatAnthropic` — connects to Claude with tool-calling and token streaming          |
+| `langchain-core`           | 1.2.17         | LangChain message types (`HumanMessage`, `ToolMessage`) and `@tool` decorator       |
+| `langchain-text-splitters` | 1.1.1          | `RecursiveCharacterTextSplitter` — splits documents into chunks for RAG             |
+| `FlagEmbedding`            | 1.3.5          | Loads the local **BGE-M3** model — converts text to 1024-dim vectors for Milvus     |
+| `pymilvus`                 | 2.6.9          | Milvus Python client — stores and searches vector embeddings                        |
+| `milvus-lite`              | 2.5.1          | Embedded Milvus — lets pymilvus run from a local `.db` file (no Docker needed)      |
+| `tavily-python`            | 0.7.22         | Tavily web search API client — powers the `web_search` tool                         |
+| `python-multipart`         | 0.0.22         | Enables file uploads in FastAPI (`UploadFile`) — used by `/v1/rag/ingest`           |
+| `pytest`                   | —              | Test runner — used for `tests/` unit tests                                          |
+
+### What gets pulled in automatically (transitive dependencies)
+
+You never need to `pip install` these. They appear in `requirements.txt` because `pip freeze` includes the full dependency tree.
+
+| Package                          | Pulled in by                             | Why it's needed                                     |
+| -------------------------------- | ---------------------------------------- | --------------------------------------------------- |
+| `anthropic`                      | `langchain-anthropic`                    | The actual Anthropic HTTP client under the hood     |
+| `httpx`, `httpcore`              | `anthropic`                              | HTTP client used by the Anthropic SDK               |
+| `starlette`                      | `fastapi`                                | FastAPI is built on top of Starlette                |
+| `pydantic`, `pydantic-core`      | `fastapi`, `pydantic-settings`           | Data validation engine                              |
+| `python-dotenv`                  | `pydantic-settings`                      | Reads the `.env` file                               |
+| `torch`                          | `FlagEmbedding`                          | PyTorch — BGE-M3 runs on top of it (~2 GB download) |
+| `transformers`                   | `FlagEmbedding`                          | HuggingFace model loading                           |
+| `sentence-transformers`          | `FlagEmbedding`                          | Sentence embedding utilities                        |
+| `huggingface-hub`                | `transformers`                           | Downloads model weights from HuggingFace cache      |
+| `accelerate`                     | `transformers`                           | Optimized model loading on CPU/GPU                  |
+| `numpy`, `scipy`, `scikit-learn` | `FlagEmbedding`, `sentence-transformers` | Math / ML utilities used internally                 |
+| `datasets`, `tokenizers`         | `FlagEmbedding`                          | HuggingFace data + tokenisation libraries           |
+| `tiktoken`                       | `langchain-anthropic`                    | Token counting for context window management        |
+| `langsmith`                      | `langchain-core`                         | LangChain tracing and observability (optional)      |
+| `tenacity`                       | `langchain-core`                         | Retry logic for API calls                           |
+| `grpcio`, `protobuf`             | `pymilvus`                               | gRPC transport used by the Milvus client            |
+| `anyio`, `sniffio`               | `fastapi`, `httpx`                       | Async I/O compatibility layer                       |
+| `uvloop`                         | `uvicorn`                                | Fast event loop backend on macOS/Linux              |
+| `aiohttp`, `yarl`                | various                                  | Async HTTP used internally                          |
+
+### Why the list looks so large
+
+`FlagEmbedding` is the main reason — it pulls in the entire PyTorch + HuggingFace ecosystem (`torch`, `transformers`, `sentence-transformers`, `accelerate`, `datasets`, `safetensors`, `tokenizers`, etc.). That single package is responsible for most of the ~80 entries you see in `requirements.txt`.
 
 ---
 
