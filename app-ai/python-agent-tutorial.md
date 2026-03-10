@@ -842,6 +842,118 @@ class RAGRetriever:
         return "\n\n---\n\n".join(parts)
 ```
 
+### 8.3 — What happens when no documents are found
+
+This is one of the most important things to understand about the agent: **the agent never crashes or returns nothing just because the knowledge base is empty.** It degrades gracefully through a fallback chain.
+
+#### How the agent "knows" there are no documents
+
+`format_for_prompt()` returns a literal string when `docs` is empty:
+
+```
+"No relevant documents found in the knowledge base."
+```
+
+That string is sent back to Claude as a `ToolMessage` in `agent_loop.py`:
+
+```python
+# agent_loop.py
+docs   = await retriever.retrieve(tool_args.get("query", request.message))
+result = retriever.format_for_prompt(docs)
+# result = "No relevant documents found in the knowledge base." (when empty)
+
+messages.append(response)
+messages.append(ToolMessage(content=str(result), tool_call_id=tool_call["id"]))
+# Claude reads this ToolMessage on the next loop iteration
+```
+
+Claude does not inspect the database directly. It simply reads the string result of the tool call — just like a human reading a search result that says "no matches found."
+
+#### The full fallback chain
+
+```
+User asks a question
+        │
+        ▼
+Claude decides to call rag_retrieve
+        │
+        ▼
+Milvus returns 0 hits  (empty collection OR all scores < MIN_SCORE 0.72)
+        │
+        ▼
+format_for_prompt([])
+  → "No relevant documents found in the knowledge base."
+        │
+        ▼
+ToolMessage sent to Claude
+        │
+        ├── Claude decides to call web_search (if question needs external data)
+        │       │
+        │       ├── TAVILY_API_KEY set → Tavily fetches live web results → answer
+        │       │
+        │       └── TAVILY_API_KEY missing → returns "Web search is not configured
+        │               (TAVILY_API_KEY missing)." as another ToolMessage
+        │               → Claude falls back to training knowledge
+        │
+        └── Claude answers directly from its own training knowledge
+              (no external tool needed for general questions)
+```
+
+The loop in `agent_loop.py` runs up to `MAX_ITERATIONS = 10` times, so Claude has multiple chances to try different tools before writing its final answer.
+
+#### Why you never see the raw "Web search is not configured" message
+
+The string `"Web search is not configured (TAVILY_API_KEY missing)."` is a **ToolMessage**, not a user-facing message. It goes into Claude's conversation context, not to the HTTP response. Claude then rephrases it (or silently falls back to its own knowledge) in its final answer.
+
+To see the raw tool results in your terminal during development, add a debug print inside the tool execution block in `agent_loop.py`:
+
+```python
+# agent_loop.py — inside the tool execution block, after result is set
+iterations.append({
+    "tool":   tool_name,
+    "args":   tool_args,
+    "result": str(result),
+})
+print(f"[DEBUG] tool={tool_name} result={str(result)[:200]}")  # add this line
+```
+
+This prints every tool result to the `uvicorn` server terminal — regardless of what Claude chooses to say to the user.
+
+To trigger `web_search` and see the "not configured" message, ask a question that needs current data:
+
+```bash
+curl -X POST http://localhost:8000/v1/agent/chat \
+  -H "Content-Type: application/json" \
+  -d '{
+    "user_id": "usr_test_001",
+    "message": "What happened in the news today?",
+    "history": [],
+    "user_context": { "subscription_tier": "free" },
+    "session_id": "sess_test_001"
+  }'
+```
+
+With the debug print active, your terminal will show:
+
+```
+[DEBUG] tool=rag_retrieve result=No relevant documents found in the knowledge base.
+[DEBUG] tool=web_search result=Web search is not configured (TAVILY_API_KEY missing).
+```
+
+And Claude's final answer to the user will say something like: *"I don't have access to real-time news..."*
+
+#### Tool selection — how Claude chooses between tools
+
+Claude selects tools based on the **docstring** of each tool, which is sent to Claude on every request via `llm.bind_tools(TOOLS)`:
+
+| Tool | Docstring Claude reads | When Claude picks it |
+|---|---|---|
+| `rag_retrieve` | *"Search the internal knowledge base for company docs, policies, or internal knowledge."* | Question looks like it's about internal/company info |
+| `web_search` | *"Search the web for current information, news, or recent events. Use when the question needs data that may not be in the knowledge base."* | Question needs live or recent data |
+| `calculator` | *"Evaluate a mathematical expression..."* | Question involves arithmetic |
+
+A better docstring = better tool selection. If Claude keeps picking the wrong tool, improve the docstring — no other code changes are needed.
+
 ---
 
 ## Step 9 — Vector Memory (`src/memory/vector_memory.py`)
