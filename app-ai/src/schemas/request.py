@@ -132,3 +132,15 @@ class AgentRequest(BaseModel):
     # session_id: unique identifier for this conversation session
     # Used for logging, tracing, and correlating SSE events.
     session_id: str
+
+    # stream: whether to stream the response as SSE events or return a single JSON body.
+    #
+    # True  (default) → stream tokens one-by-one via Server-Sent Events
+    # False           → collect ALL tokens first, then return one JSON object:
+    #                   {"type": "complete", "content": "full answer here"}
+    #
+    # When to use stream=False:
+    #   - NestJS background jobs that don't need real-time display
+    #   - Testing / curl requests where SSE parsing is inconvenient
+    #   - Clients that can't consume EventSource (some serverless platforms)
+    stream: bool = True

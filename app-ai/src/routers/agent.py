@@ -30,10 +30,13 @@ from fastapi import APIRouter, HTTPException
 # APIRouter = creates a group of routes (like Express Router in Node.js)
 # HTTPException = raises an HTTP error response with a status code and message
 
-from fastapi.responses import StreamingResponse
+from fastapi.responses import StreamingResponse, JSONResponse
 # StreamingResponse = a FastAPI response that streams data in chunks.
 # Instead of returning one big JSON body, it sends pieces one at a time.
 # The client receives each piece immediately as it's yielded.
+#
+# JSONResponse = a standard one-shot JSON response (used when stream=False).
+# FastAPI returns the full body at once — no chunked transfer encoding.
 
 import json
 # json = Python's built-in module for encoding/decoding JSON.
@@ -127,61 +130,95 @@ async def agent_chat(request: AgentRequest):
     # We update request.message so run() never sees raw PII.
     # GDPR/privacy compliance: Claude's context contains sanitized text only.
 
-    # ── Step 3: Define the SSE token streaming generator ────────────────────
-    async def token_stream():
-        # PYTHON CONCEPT — nested async function (inner function / closure):
-        #   `async def token_stream()` is defined INSIDE agent_chat().
-        #   It's a "closure" — it captures `request` from the outer function's scope.
-        #   This is similar to defining an arrow function inside another function in JS:
-        #     const tokenStream = async () => { ... /* uses request from outer scope */ }
-        #
-        # PYTHON CONCEPT — async generator function:
-        #   Because it contains `yield`, token_stream is an "async generator".
-        #   Each `yield` sends one SSE event string to the client immediately.
-        #   The function pauses at each yield and resumes when the client is ready.
-        #   In TypeScript: async function* tokenStream() { yield ...; }
+    # ── Step 3: Branch on stream flag ────────────────────────────────────────
+    if request.stream:
+        # ── Step 3a: Define the SSE token streaming generator ───────────────
+        async def token_stream():
+            # PYTHON CONCEPT — nested async function (inner function / closure):
+            #   `async def token_stream()` is defined INSIDE agent_chat().
+            #   It's a "closure" — it captures `request` from the outer function's scope.
+            #   This is similar to defining an arrow function inside another function in JS:
+            #     const tokenStream = async () => { ... /* uses request from outer scope */ }
+            #
+            # PYTHON CONCEPT — async generator function:
+            #   Because it contains `yield`, token_stream is an "async generator".
+            #   Each `yield` sends one SSE event string to the client immediately.
+            #   The function pauses at each yield and resumes when the client is ready.
+            #   In TypeScript: async function* tokenStream() { yield ...; }
 
-        async for token in run(request):
-            # run(request) is the agent loop — an async generator from agent_loop.py.
-            # `async for token in run(request)` iterates over yielded tokens.
-            # Each `token` is a string (one word or piece of a word from Claude).
-            # `async for` is required because run() is async — it awaits I/O internally.
-            # In TypeScript: for await (const token of run(request))
+            async for token in run(request):
+                # run(request) is the agent loop — an async generator from agent_loop.py.
+                # `async for token in run(request)` iterates over yielded tokens.
+                # Each `token` is a string (one word or piece of a word from Claude).
+                # `async for` is required because run() is async — it awaits I/O internally.
+                # In TypeScript: for await (const token of run(request))
 
-            if token:
-                # Skip empty strings (Claude's streaming API sometimes yields "")
-                yield f"data: {json.dumps({'type': 'token', 'content': token})}\n\n"
-                # SSE event format: "data: <JSON>\n\n"
-                # Typed JSON format so NestJS can distinguish tokens from control events:
-                #   {"type": "token", "content": "Hello"}  ← text to display
-                #   {"type": "done"}                       ← stream finished
-                #   {"type": "error", "message": "..."}    ← something went wrong
-                # NestJS reads the "type" field to decide what to do with each event.
+                if token:
+                    # Skip empty strings (Claude's streaming API sometimes yields "")
+                    yield f"data: {json.dumps({'type': 'token', 'content': token})}\n\n"
+                    # SSE event format: "data: <JSON>\n\n"
+                    # Typed JSON format so NestJS can distinguish tokens from control events:
+                    #   {"type": "token", "content": "Hello"}  ← text to display
+                    #   {"type": "done"}                       ← stream finished
+                    #   {"type": "error", "message": "..."}    ← something went wrong
+                    # NestJS reads the "type" field to decide what to do with each event.
 
-        yield f"data: {json.dumps({'type': 'done'})}\n\n"
-        # After all tokens are sent, yield the "done" sentinel event.
-        # NestJS (the client) watches for type == "done" to know the stream has ended.
-        # Without this, the client wouldn't know when to stop reading.
+            yield f"data: {json.dumps({'type': 'done'})}\n\n"
+            # After all tokens are sent, yield the "done" sentinel event.
+            # NestJS (the client) watches for type == "done" to know the stream has ended.
+            # Without this, the client wouldn't know when to stop reading.
 
-    # ── Step 4: Return a StreamingResponse wrapping the generator ────────────
-    return StreamingResponse(
-        token_stream(),
-        # token_stream() = calling the async generator function returns a generator object.
-        # StreamingResponse iterates over it, sending each yielded string to the client.
+        # ── Step 3b: Return a StreamingResponse wrapping the generator ───────
+        return StreamingResponse(
+            token_stream(),
+            # token_stream() = calling the async generator function returns a generator object.
+            # StreamingResponse iterates over it, sending each yielded string to the client.
 
-        media_type="text/event-stream",
-        # Tells the HTTP client this is an SSE stream, not JSON or HTML.
-        # The browser's EventSource API and most HTTP clients handle this automatically.
+            media_type="text/event-stream",
+            # Tells the HTTP client this is an SSE stream, not JSON or HTML.
+            # The browser's EventSource API and most HTTP clients handle this automatically.
 
-        headers={
-            "Cache-Control": "no-cache",
-            # Prevents any proxy or CDN from buffering the response.
-            # Without this, the client might not receive tokens until the entire
-            # response is buffered somewhere in the network.
+            headers={
+                "Cache-Control": "no-cache",
+                # Prevents any proxy or CDN from buffering the response.
+                # Without this, the client might not receive tokens until the entire
+                # response is buffered somewhere in the network.
 
-            "X-Accel-Buffering": "no",
-            # Nginx-specific header: tells Nginx to disable proxy_buffering for this route.
-            # Without this, Nginx would wait for the entire stream before forwarding it.
-            # Essential for real-time streaming through an Nginx reverse proxy.
-        },
+                "X-Accel-Buffering": "no",
+                # Nginx-specific header: tells Nginx to disable proxy_buffering for this route.
+                # Without this, Nginx would wait for the entire stream before forwarding it.
+                # Essential for real-time streaming through an Nginx reverse proxy.
+            },
+        )
+
+    # ── Step 3c (stream=False): Collect all tokens, return single JSON ────────
+    # Instead of yielding tokens one-by-one, we accumulate them into a string,
+    # then return the full answer in one JSON body.
+    #
+    # WHY COLLECT THEN RETURN?
+    #   The client (e.g. a NestJS background job or a curl command) may not have
+    #   an SSE parser. They just want one clean JSON response they can read at once.
+    #   We still run the exact same agent loop — only the delivery format changes.
+
+    chunks: list[str] = []
+    # chunks = every token yielded by run() will be appended here.
+    # list[str] type hint = TypeScript equivalent: string[]
+
+    async for token in run(request):
+        # Same loop as in the streaming case — run() is unchanged.
+        # `async for` iterates the async generator and awaits each token.
+        if token:
+            chunks.append(token)
+            # Collect the token instead of yielding it immediately.
+
+    full_content = "".join(chunks)
+    # "".join(chunks) = concatenate all tokens into one string.
+    # e.g. ["Hello", " world", "!"] → "Hello world!"
+    # This is the complete agent answer.
+
+    return JSONResponse(
+        content={"type": "complete", "content": full_content},
+        # {"type": "complete"} mirrors the SSE typed-event convention.
+        # NestJS can check `type === "complete"` and read `content` directly.
+        # Consistent typing makes it easy to switch between stream/non-stream modes.
     )
