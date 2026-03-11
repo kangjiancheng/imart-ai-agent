@@ -146,22 +146,36 @@ async def agent_chat(request: AgentRequest):
             #   The function pauses at each yield and resumes when the client is ready.
             #   In TypeScript: async function* tokenStream() { yield ...; }
 
-            async for token in run(request):
-                # run(request) is the agent loop — an async generator from agent_loop.py.
-                # `async for token in run(request)` iterates over yielded tokens.
-                # Each `token` is a string (one word or piece of a word from Claude).
-                # `async for` is required because run() is async — it awaits I/O internally.
-                # In TypeScript: for await (const token of run(request))
+            try:
+                async for token in run(request):
+                    # run(request) is the agent loop — an async generator from agent_loop.py.
+                    # `async for token in run(request)` iterates over yielded tokens.
+                    # Each `token` is a string (one word or piece of a word from Claude).
+                    # `async for` is required because run() is async — it awaits I/O internally.
+                    # In TypeScript: for await (const token of run(request))
 
-                if token:
-                    # Skip empty strings (Claude's streaming API sometimes yields "")
-                    yield f"data: {json.dumps({'type': 'token', 'content': token})}\n\n"
-                    # SSE event format: "data: <JSON>\n\n"
-                    # Typed JSON format so NestJS can distinguish tokens from control events:
-                    #   {"type": "token", "content": "Hello"}  ← text to display
-                    #   {"type": "done"}                       ← stream finished
-                    #   {"type": "error", "message": "..."}    ← something went wrong
-                    # NestJS reads the "type" field to decide what to do with each event.
+                    if token:
+                        # Skip empty strings (Claude's streaming API sometimes yields "")
+                        # ensure_ascii=False → Chinese/Unicode characters are sent as-is
+                        # instead of being escaped to \uXXXX sequences.
+                        yield f"data: {json.dumps({'type': 'token', 'content': token}, ensure_ascii=False)}\n\n"
+                        # SSE event format: "data: <JSON>\n\n"
+                        # Typed JSON format so NestJS can distinguish tokens from control events:
+                        #   {"type": "token", "content": "Hello"}  ← text to display
+                        #   {"type": "done"}                       ← stream finished
+                        #   {"type": "error", "message": "..."}    ← something went wrong
+                        # NestJS reads the "type" field to decide what to do with each event.
+
+            except Exception as exc:
+                # If the agent loop raises an error (e.g. Anthropic 503 no capacity),
+                # catch it here and send a typed "error" SSE event to the client.
+                # The client (NestJS) reads type == "error", shows the message to the user,
+                # and ends the current conversation so a new chat can be started.
+                yield f"data: {json.dumps({'type': 'error', 'message': str(exc)}, ensure_ascii=False)}\n\n"
+                return
+                # `return` inside an async generator stops the stream immediately.
+                # Without it, the "done" event below would also be sent after the error,
+                # which would confuse the client into thinking the stream ended normally.
 
             yield f"data: {json.dumps({'type': 'done'})}\n\n"
             # After all tokens are sent, yield the "done" sentinel event.
@@ -216,9 +230,20 @@ async def agent_chat(request: AgentRequest):
     # e.g. ["Hello", " world", "!"] → "Hello world!"
     # This is the complete agent answer.
 
-    return JSONResponse(
+    return _UTF8JSONResponse(
         content={"type": "complete", "content": full_content},
         # {"type": "complete"} mirrors the SSE typed-event convention.
         # NestJS can check `type === "complete"` and read `content` directly.
         # Consistent typing makes it easy to switch between stream/non-stream modes.
     )
+
+
+# ── Configure FastAPI's JSON encoder to output Chinese characters as-is ───────
+# JSONResponse internally uses Python's json module with ensure_ascii=True by default,
+# which turns 中文 → \u4e2d\u6587. Override at the router level so all JSON responses
+# (including error responses) use ensure_ascii=False.
+import json as _json
+
+class _UTF8JSONResponse(JSONResponse):
+    def render(self, content) -> bytes:
+        return _json.dumps(content, ensure_ascii=False).encode("utf-8")

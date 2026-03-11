@@ -31,7 +31,20 @@ tavily-python==0.7.22
 # cohere
 
 # PDF parsing (for RAG document ingestion)
-pypdf==5.4.0
+# pymupdf: uses MuPDF C library — handles Chinese CID fonts correctly.
+# pdfplumber (pdfminer.six) returns \u0001 placeholders for unmapped CID characters;
+# PyMuPDF decodes them correctly. Also no dependency conflicts with FlagEmbedding.
+pymupdf==1.27.2
+# OCR fallback for scanned/image-based PDFs (requires system tesseract):
+#   brew install tesseract tesseract-lang   (macOS)
+# pytesseract: Python wrapper around tesseract CLI
+# pillow: image library — PyMuPDF renders a page to PNG, Pillow opens it for tesseract
+pytesseract
+pillow
+# NOTE: unstructured was tried but abandoned — it eagerly imports unstructured_inference
+#       which forces transformers → v5.x, breaking FlagEmbedding (needs v4.44.2).
+# NOTE: pdfplumber was tried but abandoned — pdfminer.six fails to decode Chinese CID
+#       fonts, returning \u0001 control characters instead of actual text.
 
 # Testing
 pytest

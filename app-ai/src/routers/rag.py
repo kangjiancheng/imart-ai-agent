@@ -115,52 +115,140 @@ async def ingest_document(
             # await = pause until the file bytes are fully read (non-blocking).
             # content is a `bytes` object (raw binary data).
 
-            # Step 3b: Extract text based on file type.
+            # Step 3b: Extract and chunk based on file type.
             #
-            # WHY NOT just content.decode("utf-8")?
-            #   PDFs are BINARY files — they contain fonts, images, and compressed
-            #   streams alongside text. Decoding them as UTF-8 produces mostly garbage
-            #   because bytes() silently discards non-UTF-8 bytes (errors="ignore"),
-            #   leaving almost no readable text. Milvus then stores empty chunks,
-            #   so RAG retrieval finds nothing.
+            # WHY split by file type?
+            #   PDFs are binary — they need a parser that understands the format.
+            #   pdfplumber extracts table rows as structured text (col1 | col2 | col3)
+            #   so table-heavy PDFs produce coherent, embeddable chunks.
+            #   Plain text files can be split directly with RecursiveCharacterTextSplitter.
             #
-            #   The fix: detect PDF files and use a proper PDF parser (pypdf)
-            #   to extract clean, readable text before chunking.
+            # WHY pdfplumber instead of unstructured?
+            #   unstructured eagerly imports unstructured_inference at module load time
+            #   regardless of strategy. unstructured_inference forces transformers → v5.x
+            #   which breaks FlagEmbedding (needs transformers==4.44.2).
+            #   pdfplumber has no such dependency conflicts — lightweight and table-aware.
 
             content_type = file.content_type or ""
             filename_lower = (file.filename or "").lower()
 
-            if content_type == "application/pdf" or filename_lower.endswith(".pdf"):
-                # ── PDF extraction via pypdf ──────────────────────────────────
-                # pypdf reads the binary PDF format and extracts the text
-                # from each page, returning clean Unicode strings.
-                import io
-                from pypdf import PdfReader
-                # io.BytesIO wraps raw bytes as a file-like object,
-                # so PdfReader can read it without needing a real file path.
-                reader = PdfReader(io.BytesIO(content))
-                # reader.pages = list of page objects; .extract_text() returns
-                # the plain text of that page (or empty string if image-only).
-                pages_text = [page.extract_text() or "" for page in reader.pages]
-                text = "\n\n".join(pages_text)
-                print(f"Extracted {len(pages_text)} pages from PDF, total {len(text)} characters, {text}")
-                # Join pages with double newlines so chunk boundaries are clean.
-            else:
-                # Plain text / Markdown / other text-based formats
-                text = content.decode("utf-8", errors="ignore")
-
-            # Step 4: Import processing dependencies inside the function.
-            # PYTHON CONCEPT — deferred import (see web_search.py for explanation):
-            #   These are imported here (not at the top) so a missing dependency
-            #   only fails during actual ingestion, not at app startup.
             from src.rag.chunker import chunk_text
+
+            if content_type == "application/pdf" or filename_lower.endswith(".pdf"):
+                # ── PDF path: PyMuPDF (fitz) ──────────────────────────────────
+                #
+                # WHY PyMuPDF instead of pdfplumber?
+                #   pdfplumber uses pdfminer.six for text decoding. pdfminer.six
+                #   cannot decode Chinese CID fonts (non-standard font encoding
+                #   common in PDFs made by WPS, government tools, older InDesign).
+                #   It substitutes unmapped characters with \u0001 control chars,
+                #   so almost no text is extracted.
+                #
+                #   PyMuPDF uses the MuPDF C library, which has broad CID font
+                #   support and correctly decodes Chinese text in these PDFs.
+                #   Zero dependency conflicts with FlagEmbedding / transformers.
+                #
+                # API used:
+                #   fitz.open(stream=BytesIO(content), filetype="pdf")
+                #     → opens in-memory (no temp file needed)
+                #   page.get_text()
+                #     → returns full decoded text for the page (plain string)
+                #   page.find_tables() (PyMuPDF >= 1.23)
+                #     → detects table regions; tab.extract() → list of rows
+                #     → each row is a list of cell strings
+                import io
+                import fitz  # pymupdf
+
+                pages_text = []
+                doc = fitz.open(stream=io.BytesIO(content), filetype="pdf")
+
+                for page in doc:
+                    page_parts = []
+
+                    # Extract tables as "col1 | col2 | col3" rows first.
+                    # find_tables() was added in PyMuPDF 1.23 — guard with try/except
+                    # in case an older version is installed.
+                    try:
+                        for tab in page.find_tables():
+                            for row in tab.extract():
+                                # row = list of cell values (may be None for empty cells)
+                                row_text = " | ".join(
+                                    str(cell).strip() for cell in row if cell
+                                )
+                                if row_text:
+                                    page_parts.append(row_text)
+                    except AttributeError:
+                        pass  # PyMuPDF < 1.23: find_tables() not available, skip
+
+                    # Extract full page text (includes headings, paragraphs, table text).
+                    # get_text() correctly decodes CID/Unicode fonts unlike pdfminer.
+                    plain = page.get_text() or ""
+
+                    # Detect pages that need OCR.
+                    #
+                    # Two cases where get_text() is insufficient:
+                    #   1. plain is completely empty → clearly an image-only page.
+                    #   2. plain is very short AND the page has embedded images →
+                    #      get_text() only captured a title/metadata label, while
+                    #      the actual content is inside an image (screenshot-style PDF).
+                    #      Example: page 1 returns "IoT管理后台需求" (10 chars) but the
+                    #      requirements table is an image — the 10 chars are just the
+                    #      document title at the top of the scanned screenshot.
+                    #
+                    # Threshold: < 50 chars is too short to be the full content of a page.
+                    # We only apply the threshold when the page contains embedded images,
+                    # so we don't accidentally OCR a legitimate short text-only page.
+                    images_on_page = page.get_images()
+                    needs_ocr = (
+                        not plain.strip()
+                        or (images_on_page and len(plain.strip()) < 50)
+                    )
+
+                    if needs_ocr:
+                        # Fall back to OCR: render the page to a PNG image, then run
+                        # tesseract to recognize the text.
+                        #
+                        # PYTHON CONCEPT — lazy import inside try/except:
+                        #   We import pytesseract here (not at the top of the file) so
+                        #   the server still starts even if tesseract is not installed.
+                        #   If tesseract is missing, the except silently skips OCR for
+                        #   this page rather than crashing the whole ingestion job.
+                        #
+                        # fitz.Matrix(2, 2) = 2× zoom → higher DPI image → better OCR accuracy.
+                        # pix.tobytes("png") = render page pixels as PNG bytes.
+                        # lang="chi_sim+eng" = Simplified Chinese + English language packs.
+                        try:
+                            import pytesseract
+                            from PIL import Image
+
+                            mat = fitz.Matrix(2, 2)
+                            pix = page.get_pixmap(matrix=mat)
+                            img = Image.open(io.BytesIO(pix.tobytes("png")))
+                            ocr_text = pytesseract.image_to_string(img, lang="chi_sim+eng")
+                            # Use OCR result if it's longer than what get_text() returned.
+                            if len(ocr_text.strip()) > len(plain.strip()):
+                                plain = ocr_text
+                        except Exception:
+                            pass  # tesseract not installed or OCR failed — keep plain as-is
+
+                    if plain.strip():
+                        page_parts.append(plain.strip())
+
+                    pages_text.append("\n".join(page_parts))
+
+                doc.close()
+                text = "\n\n".join(pages_text)
+                chunks = chunk_text(text)
+
+            else:
+                # ── Non-PDF path: plain text decode + RecursiveCharacterTextSplitter
+                chunks = chunk_text(content.decode("utf-8", errors="ignore"))
+
+            # Step 4: Import remaining processing dependencies.
             from src.rag.embeddings import EmbeddingClient
             from src.config.settings import settings
 
-            # Step 5: Split the text into chunks (paragraphs / fixed-size pieces).
-            chunks = chunk_text(text)
-            # chunk_text returns a list[str] — each string is one chunk.
-            # Chunking is needed because embedding models have token limits (typically 8192).
+            # Step 5: chunks is now list[str] for both paths — same insert loop below.
 
             # Step 6: Create an embedding client for vectorizing chunks.
             embedder = EmbeddingClient()
@@ -259,3 +347,306 @@ async def get_ingest_status(job_id: str):
     #     = {"job_id": "550e8400-...", "status": "done", "file": "manual.pdf"}
     #   In TypeScript: { jobId, ...job }
     #   This is Python's equivalent of the JavaScript spread operator for objects.
+
+
+# ── GET /v1/rag/chunks ─────────────────────────────────────────────────────────
+# Inspect stored chunks for a specific source file (debug / verification endpoint).
+#
+# WHY THIS ENDPOINT?
+#   After uploading a PDF you want to verify:
+#     - Was the text extracted correctly? (no garbled characters)
+#     - How was the document split? (chunk boundaries make sense)
+#     - How many chunks were stored?
+#   This endpoint fetches every stored chunk for a given filename directly
+#   from Milvus so you can see exactly what Claude will retrieve at query time.
+#
+# USAGE:
+#   GET /v1/rag/chunks?source=your-file.pdf
+#   GET /v1/rag/chunks?source=your-file.pdf&limit=5   (first 5 chunks only)
+#
+# HOW MILVUS QUERY WORKS (vs search):
+#   client.search()  → ANN vector search (needs a query embedding)
+#   client.query()   → scalar filter fetch (no vector needed, like SQL WHERE)
+#   Here we use query() with filter `source == "filename"` to list all chunks
+#   that belong to a specific file — no embedding required.
+
+@router.get("/rag/chunks")
+async def list_chunks(
+    source: str,
+    # `source` is a QUERY PARAMETER — it comes from the URL after `?`.
+    # Example: GET /v1/rag/chunks?source=manual.pdf → source = "manual.pdf"
+    # FastAPI reads query parameters from the function signature automatically.
+    # In Express: req.query.source
+
+    limit: int = 20,
+    # Optional query parameter with a default value of 20.
+    # GET /v1/rag/chunks?source=x&limit=5 → returns first 5 chunks only.
+    # Useful if the PDF is large and you just want a quick sample.
+):
+    """
+    Return stored chunks for a given source file from Milvus.
+    Use this after ingestion to verify the PDF was parsed and split correctly.
+
+    Example:
+      GET /v1/rag/chunks?source=product-manual.pdf
+      GET /v1/rag/chunks?source=product-manual.pdf&limit=5
+    """
+    from fastapi import HTTPException
+    from pymilvus import MilvusClient
+    from src.config.settings import settings
+
+    try:
+        client = MilvusClient(
+            uri=settings.milvus_uri,
+            token=settings.milvus_token or None,
+        )
+
+        # Ensure the collection exists before querying.
+        # (If no documents have been ingested yet, ensure_collection creates it
+        #  and query() returns an empty list — no crash.)
+        ensure_collection(client, settings.milvus_collection_knowledge)
+
+        # MILVUS CONCEPT — client.query() with a scalar filter:
+        #   Unlike client.search() (which finds vectors nearest to a query vector),
+        #   client.query() fetches rows that match a boolean filter expression —
+        #   similar to SQL: SELECT content, source FROM knowledge_base WHERE source = '...'
+        #
+        # filter syntax uses Milvus expression language:
+        #   `source == "filename.pdf"` — exact string match on the "source" dynamic field.
+        #
+        # output_fields: which fields to include in each returned row.
+        #   We skip "vector" (1024 floats) — it's not human-readable.
+        #   "id" is the auto-generated Milvus primary key.
+        results = client.query(
+            collection_name=settings.milvus_collection_knowledge,
+            filter=f'source == "{source}"',
+            # PYTHON CONCEPT — f-string:
+            #   f'source == "{source}"' inserts the value of `source` into the string.
+            #   If source = "manual.pdf", filter = 'source == "manual.pdf"'
+            #   The inner double-quotes are part of the Milvus filter syntax.
+
+            output_fields=["id", "content", "source"],
+            # Return id, content, and source for each chunk.
+            # "vector" is intentionally omitted — 1024 floats are not useful to read.
+
+            limit=limit,
+            # Cap the number of rows returned (default 20, configurable via ?limit=N).
+        )
+
+        if not results:
+            # No chunks found for this source — either the file was never ingested,
+            # the filename doesn't match exactly, or ingestion failed.
+            raise HTTPException(
+                status_code=404,
+                detail=f"No chunks found for source='{source}'. "
+                       f"Check the exact filename used during upload.",
+            )
+
+        # Build a clean response: total count + list of chunks with index labels.
+        chunks = [
+            {
+                "index": i + 1,
+                # Human-friendly 1-based index so you can say "chunk 3 looks wrong".
+
+                "id": row["id"],
+                # Milvus auto-generated primary key — useful for debugging duplicates.
+
+                "content": row["content"],
+                # The actual extracted text for this chunk — the main thing to verify.
+
+                "source": row["source"],
+                # Should match the filename you queried for.
+
+                "char_count": len(row["content"]),
+                # Character count — quick way to spot empty or suspiciously short chunks.
+                # In TypeScript: row.content.length
+            }
+            for i, row in enumerate(results)
+            # PYTHON CONCEPT — list comprehension:
+            #   [expression for i, row in enumerate(results)]
+            #   is a compact way to build a list by iterating — equivalent to:
+            #     chunks = []
+            #     for i, row in enumerate(results):
+            #         chunks.append({...})
+            #   enumerate(results) yields (0, row0), (1, row1), ...
+            #   In TypeScript: results.map((row, i) => ({ index: i + 1, ... }))
+        ]
+
+        return {
+            "source": source,
+            "total_chunks": len(chunks),
+            # len(chunks) = number of items in the list.
+            # In TypeScript: chunks.length
+
+            "chunks": chunks,
+            # The full list of chunk dicts — one per stored text segment.
+        }
+
+    except HTTPException:
+        # Re-raise our own 404 without wrapping it in a 500.
+        # PYTHON CONCEPT — bare `raise`:
+        #   `raise` inside an except block re-raises the current exception unchanged.
+        raise
+
+    except Exception as e:
+        # Any other error (Milvus connection failed, filter syntax error, etc.)
+        raise HTTPException(status_code=500, detail=f"Milvus query failed: {e}")
+
+
+
+# ── GET /v1/rag/content ────────────────────────────────────────────────────────
+# Return the full extracted text for a source file as a single joined string.
+#
+# WHY THIS ENDPOINT?
+#   GET /v1/rag/chunks returns chunks split into segments — useful for seeing
+#   how the document was split. But sometimes you want to read the complete
+#   extracted text as one continuous document to verify overall extraction quality.
+#
+#   This endpoint fetches all stored chunks for a source, sorts them by their
+#   Milvus insert order (id), and joins them with double newlines — giving you
+#   the full reconstructed text.
+#
+# USAGE:
+#   GET /v1/rag/content?source=your-file.pdf
+#
+# NOTE ON ORDERING:
+#   Milvus does not guarantee query() result order. We sort by "id" (the
+#   auto-increment primary key) as a best proxy for insertion order, which
+#   corresponds to page/chunk order in the original document.
+
+@router.get("/rag/content")
+async def get_full_content(
+    source: str,
+    # Query parameter: the exact filename used when the file was uploaded.
+    # Example: GET /v1/rag/content?source=IoT管理后台需求.pdf
+):
+    """
+    Return the full extracted text for a source file as one joined string.
+    Fetches all chunks from Milvus, sorts by id, and joins with double newlines.
+
+    Example:
+      GET /v1/rag/content?source=IoT管理后台需求.pdf
+    """
+    from fastapi import HTTPException
+    from pymilvus import MilvusClient
+    from src.config.settings import settings
+
+    try:
+        client = MilvusClient(
+            uri=settings.milvus_uri,
+            token=settings.milvus_token or None,
+        )
+
+        ensure_collection(client, settings.milvus_collection_knowledge)
+
+        # Fetch ALL chunks for this source.
+        # limit=16384 is Milvus Lite's practical max — well above any real document.
+        # We fetch id + content so we can sort by id (insertion order proxy).
+        results = client.query(
+            collection_name=settings.milvus_collection_knowledge,
+            filter=f'source == "{source}"',
+            output_fields=["id", "content"],
+            limit=16384,
+        )
+
+        if not results:
+            raise HTTPException(
+                status_code=404,
+                detail=f"No chunks found for source='{source}'. "
+                       f"Check the exact filename used during upload.",
+            )
+
+        # Sort by Milvus primary key (id) as a proxy for insertion order.
+        # Chunks were inserted page-by-page, so ascending id ≈ document order.
+        results.sort(key=lambda row: row["id"])
+
+        # Join all chunk content into one continuous text.
+        # Chunks overlap by 200 chars (RecursiveCharacterTextSplitter overlap),
+        # so the joined text will have some repeated sentences at chunk boundaries.
+        # This is expected — it does NOT mean content is duplicated in Milvus.
+        full_text = "\n\n".join(row["content"] for row in results)
+
+        return {
+            "source": source,
+            "total_chunks": len(results),
+            # How many chunks were found and joined.
+
+            "total_chars": len(full_text),
+            # Total character count of the joined text (includes overlap regions).
+
+            "content": full_text,
+            # The full reconstructed document text — read this to verify extraction.
+        }
+
+    except HTTPException:
+        raise
+
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Milvus query failed: {e}")
+
+
+# ── DELETE /v1/rag/chunks ──────────────────────────────────────────────────────
+# Delete all stored chunks for a specific source file.
+#
+# WHY THIS ENDPOINT?
+#   If a PDF was ingested with bad/garbled content (e.g. raw binary stored instead
+#   of extracted text because the server was running old code), you can clean up
+#   the bad data here, then re-ingest the file with the corrected code.
+#
+# USAGE:
+#   DELETE /v1/rag/chunks?source=your-file.pdf
+#
+# MILVUS DELETE:
+#   client.delete() removes rows matching a scalar filter expression —
+#   similar to SQL: DELETE FROM knowledge_base WHERE source = '...'
+#   It returns a dict with "delete_count" showing how many rows were removed.
+
+@router.delete("/rag/chunks")
+async def delete_chunks(source: str):
+    """
+    Delete all stored chunks for a given source file from Milvus.
+    Use this to clear bad/garbled chunks before re-ingesting a corrected file.
+
+    Example:
+      DELETE /v1/rag/chunks?source=product-manual.pdf
+    """
+    from fastapi import HTTPException
+    from pymilvus import MilvusClient
+    from src.config.settings import settings
+
+    try:
+        client = MilvusClient(
+            uri=settings.milvus_uri,
+            token=settings.milvus_token or None,
+        )
+
+        ensure_collection(client, settings.milvus_collection_knowledge)
+
+        # Delete all rows where source matches the given filename.
+        # Milvus filter syntax: `source == "filename"` (same as used in query above).
+        result = client.delete(
+            collection_name=settings.milvus_collection_knowledge,
+            filter=f'source == "{source}"',
+        )
+
+        deleted = result.get("delete_count", 0)
+        # result is a dict like {"delete_count": 20}.
+        # .get("delete_count", 0) safely reads the count; defaults to 0 if missing.
+
+        if deleted == 0:
+            raise HTTPException(
+                status_code=404,
+                detail=f"No chunks found for source='{source}'. Nothing was deleted.",
+            )
+
+        return {
+            "source": source,
+            "deleted_chunks": deleted,
+            "message": f"Deleted {deleted} chunks. You can now re-ingest the file.",
+        }
+
+    except HTTPException:
+        raise
+
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Milvus delete failed: {e}")

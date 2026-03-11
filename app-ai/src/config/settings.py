@@ -93,9 +93,11 @@ class Settings(BaseSettings):
     # How many documents to retrieve from Milvus per RAG query.
     # More = more context for Claude, but also more tokens consumed.
 
-    rag_min_score: float = 0.72
+    rag_min_score: float = 0.50
     # Minimum similarity score (0.0–1.0) to include a document in results.
-    # 0.72 = only documents that are at least 72% semantically similar to the query.
+    # Lowered from 0.72 to 0.50 because OCR-extracted text has noise (garbled characters,
+    # misaligned table columns) that reduces cosine similarity scores.
+    # 0.50 still filters out unrelated content while allowing imperfect OCR matches through.
     # Lower = more results but lower quality. Higher = fewer but more relevant results.
 
     # ── Optional: custom Anthropic endpoint (proxy / on-prem) ────────────────

@@ -21,6 +21,7 @@
 # In JS/TS:   like an AsyncGenerator or ReadableStream
 # ─────────────────────────────────────────────────────────────────────────────
 
+import anthropic
 from langchain_core.messages import HumanMessage, ToolMessage
 # HumanMessage  = a typed object representing one user message turn
 #                 Claude needs typed objects, not plain {"role": "user", ...} dicts
@@ -148,7 +149,15 @@ async def run(request: AgentRequest):
         # If the messages list has grown too large, drop the oldest pairs.
         # We always keep the SystemMessage — only old human/assistant turns are dropped.
 
-        response = await planner.ainvoke(messages)
+        try:
+            response = await planner.ainvoke(messages)
+        except anthropic.InternalServerError as exc:
+            # 503 = Anthropic is temporarily overloaded. Surface a clear message to the caller.
+            raise RuntimeError(
+                "Anthropic service is temporarily unavailable (503). "
+                "Please try again in a moment."
+            ) from exc
+
         # ainvoke() = "async invoke" — send ALL messages to Claude, wait for the FULL response.
         # We need the FULL response here (not streaming) because we have to READ
         # response.tool_calls to know whether Claude wants to call a tool.
