@@ -494,6 +494,8 @@ app-ai/
 
 ## How files work together
 
+### Full request lifecycle
+
 ```
 ┌─────────────────────────────────────────────────────────────────────────┐
 │                         INCOMING REQUEST                                │
@@ -546,41 +548,134 @@ app-ai/
 │  1. recall memory   ──►  src/memory/vector_memory.py                     │
 │                          Milvus similarity search on user_memory         │
 │                          → up to 5 past facts injected into system prompt│
+│                          threshold: 0.78 (higher than RAG — must be      │
+│                          confident before injecting personal context)    │
 │                                                                          │
 │  2. build messages  ──►  src/llm/claude_client.py                        │
 │                          history dicts → typed LangChain message objects │
 │                          SystemMessage + HumanMessage + AIMessage chain  │
+│                          system prompt = identity + rules + recalled mem │
 │                                                                          │
-│  3. ReAct loop  (max 10 iterations)                                      │
+│  3. bind tools      ──►  src/tools/registry.py                           │
+│                          llm.bind_tools(TOOLS) tells Claude what tools   │
+│                          are available by embedding their JSON schemas   │
+│                          planner = llm with tools attached               │
+│                                                                          │
+│  4. ReAct loop  (max 10 iterations)                                      │
 │     ┌─────────────────────────────────────────────────────────┐          │
 │     │  planner.ainvoke(messages)  ← full response needed      │          │
 │     │       │                       to read tool_calls        │          │
+│     │       │  (ainvoke waits for complete response;          │          │
+│     │       │   tool_calls would be incomplete mid-stream)    │          │
 │     │       │                                                 │          │
 │     │       ├── no tool_calls → stream final answer → break   │          │
 │     │       │       planner.astream() yields tokens one-by-one│          │
+│     │       │       (uses planner not llm — tool schemas must │          │
+│     │       │        be present for tool_use history blocks)  │          │
 │     │       │                                                 │          │
-│     │       └── tool_calls present                            │          │
+│     │       └── tool_calls present → execute tool             │          │
 │     │               │                                         │          │
 │     │               ├─ rag_retrieve ──► src/rag/retriever.py  │          │
-│     │               │                  embeddings.py (BGE-M3) │          │
-│     │               │                  Milvus knowledge_base  │          │
+│     │               │   special case: NOT in tool_map         │          │
+│     │               │   stub in registry.py = declaration     │          │
+│     │               │   RAGRetriever = real async execution   │          │
+│     │               │   embed query → Milvus cosine search    │          │
+│     │               │   top_k=5, min_score=0.72               │          │
+│     │               │   → format_for_prompt() → ToolMessage   │          │
 │     │               │                                         │          │
 │     │               ├─ web_search  ──► src/tools/web_search.py│          │
-│     │               │                  Tavily API             │          │
+│     │               │   Tavily API → 3 clean text snippets    │          │
+│     │               │   returns error string if key missing   │          │
+│     │               │   (never crashes the loop)              │          │
 │     │               │                                         │          │
 │     │               └─ calculator  ──► src/tools/calculator.py│          │
-│     │                                  AST-safe math eval      │          │
+│     │                   AST-safe math eval (no eval() risk)   │          │
+│     │                   e.g. "340 * 0.15" → "51.0"            │          │
 │     │                                                         │          │
-│     │  tool result → ToolMessage → appended to messages        │          │
-│     │  → next iteration: Claude reads result and reasons again │          │
+│     │  tool result → append AIMessage + ToolMessage to list   │          │
+│     │  → next iteration: Claude sees full history + result    │          │
+│     │  → Claude reasons again and either calls another tool   │          │
+│     │    or declares it has enough info to answer             │          │
 │     └─────────────────────────────────────────────────────────┘          │
 │                                                                          │
-│  4. stream final answer  tokens → SSE → NestJS                          │
+│  5. stream final answer  tokens → SSE → NestJS                          │
 │                                                                          │
-│  5. store memory   ──►  src/memory/vector_memory.py                      │
+│  6. store memory   ──►  src/memory/vector_memory.py                      │
 │                         session summary written AFTER streaming ends     │
+│                         (writing during stream would add latency)        │
 └──────────────────────────────────────────────────────────────────────────┘
 ```
+
+---
+
+### Tool lifecycle — register → decide → execute
+
+Claude never calls tools directly. It says "I want to call X with these args." The agent loop executes it and feeds the result back.
+
+```
+STAGE 1: REGISTER              STAGE 2: CLAUDE DECIDES         STAGE 3: EXECUTE
+─────────────────              ───────────────────────         ────────────────
+tools/registry.py              agent_loop.py:123               agent_loop.py:217–242
+
+TOOLS = [                      planner =                       if tool_name == "rag_retrieve":
+  web_search,                    llm.bind_tools(TOOLS)           RAGRetriever.retrieve()
+  calculator,                  ↓                               else:
+  rag_retrieve,                response =                        tool_map[name].ainvoke()
+]                                planner.ainvoke(messages)
+                               ↓
+tool_map = {                   tool_call =
+  "web_search": ...,             response.tool_calls[0]
+  "calculator": ...,           ↓
+  # rag_retrieve excluded      tool_name, tool_args extracted
+}
+```
+
+**How Claude picks the right tool** — it reads each tool's docstring:
+
+| Tool | Docstring Claude reads | Example question |
+| ------------- | ----------------------------------------------- | ---------------------------------- |
+| `web_search` | "current information, news, or recent events" | "What happened in the news today?" |
+| `calculator` | "evaluate a math expression" | "What is 15% tip on $340?" |
+| `rag_retrieve` | "internal knowledge base, company docs, policies" | "What does our refund policy say?" |
+
+If no tool is needed, `response.tool_calls` is empty and Claude answers directly.
+
+**Why `rag_retrieve` is a stub in registry.py** — the `@tool` decorator only needs the docstring and type hints to generate a JSON schema for Claude. The function body (`return ""`) is never executed. The real work happens in `rag/retriever.py` via `RAGRetriever`, which is `async` — it must be `await`-ed in the loop, which a `@tool` stub cannot do cleanly.
+
+**Example: multi-tool conversation trace**
+
+```
+User: "What is 15% of 340, and what does our return policy say?"
+
+Iteration 1 — Claude emits:
+  tool_call { name: "calculator", args: { expression: "340 * 0.15" } }
+  → agent_loop: tool_map["calculator"].ainvoke({"expression": "340 * 0.15"})
+  → result: "51.0"
+  → messages += [AIMessage(tool_calls=[...]), ToolMessage("51.0")]
+
+Iteration 2 — Claude reads "51.0", now emits:
+  tool_call { name: "rag_retrieve", args: { query: "return policy" } }
+  → agent_loop: RAGRetriever().retrieve("return policy")
+  → result: "[Document 1 — source: policy.pdf]\nReturns accepted within 30 days..."
+  → messages += [AIMessage(tool_calls=[...]), ToolMessage("[Document 1...]")]
+
+Iteration 3 — Claude reads both results, tool_calls = [] (done)
+  → agent_loop: planner.astream(messages) → streams tokens one-by-one
+  → "15% of 340 is 51. Our return policy allows returns within 30 days."
+```
+
+**Key lines in `agent_loop.py`:**
+
+| What happens | Line | Code |
+| -------------------------------- | ---- | --------------------------------- |
+| Tools registered to Claude | 123 | `planner = llm.bind_tools(TOOLS)` |
+| Claude decides which tool | 151 | `planner.ainvoke(messages)` |
+| RAG branch | 217 | `if tool_name == "rag_retrieve"` |
+| All other tools | 228 | `tool_map.get(tool_name)` |
+| Result fed back to Claude | 257 | `messages.append(ToolMessage(...))` |
+| Final answer streamed | 190 | `planner.astream(messages)` |
+
+---
 
 ### Why each directory has one responsibility
 
