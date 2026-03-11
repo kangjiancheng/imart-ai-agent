@@ -11,7 +11,16 @@ AI agent microservice for the app platform. Built with FastAPI and LangChain, po
 bash standalone_embed.sh start     # requires sudo password
 
 cd app-ai
-source venv/bin/activate # stop: deactivate
+
+ # Set Up a Virtual Environment
+python -m venv venv
+
+ # stop: deactivate
+source venv/bin/activate
+
+# Install Required Dependencies
+pip install -r requirements.txt
+
 uvicorn src.main:app --reload --port 8000
 ```
 
@@ -632,10 +641,10 @@ tool_map = {                   tool_call =
 
 **How Claude picks the right tool** — it reads each tool's docstring:
 
-| Tool | Docstring Claude reads | Example question |
-| ------------- | ----------------------------------------------- | ---------------------------------- |
-| `web_search` | "current information, news, or recent events" | "What happened in the news today?" |
-| `calculator` | "evaluate a math expression" | "What is 15% tip on $340?" |
+| Tool           | Docstring Claude reads                            | Example question                   |
+| -------------- | ------------------------------------------------- | ---------------------------------- |
+| `web_search`   | "current information, news, or recent events"     | "What happened in the news today?" |
+| `calculator`   | "evaluate a math expression"                      | "What is 15% tip on $340?"         |
 | `rag_retrieve` | "internal knowledge base, company docs, policies" | "What does our refund policy say?" |
 
 If no tool is needed, `response.tool_calls` is empty and Claude answers directly.
@@ -666,14 +675,14 @@ Iteration 3 — Claude reads both results, tool_calls = [] (done)
 
 **Key lines in `agent_loop.py`:**
 
-| What happens | Line | Code |
-| -------------------------------- | ---- | --------------------------------- |
-| Tools registered to Claude | 123 | `planner = llm.bind_tools(TOOLS)` |
-| Claude decides which tool | 151 | `planner.ainvoke(messages)` |
-| RAG branch | 217 | `if tool_name == "rag_retrieve"` |
-| All other tools | 228 | `tool_map.get(tool_name)` |
-| Result fed back to Claude | 257 | `messages.append(ToolMessage(...))` |
-| Final answer streamed | 190 | `planner.astream(messages)` |
+| What happens               | Line | Code                                |
+| -------------------------- | ---- | ----------------------------------- |
+| Tools registered to Claude | 123  | `planner = llm.bind_tools(TOOLS)`   |
+| Claude decides which tool  | 151  | `planner.ainvoke(messages)`         |
+| RAG branch                 | 217  | `if tool_name == "rag_retrieve"`    |
+| All other tools            | 228  | `tool_map.get(tool_name)`           |
+| Result fed back to Claude  | 257  | `messages.append(ToolMessage(...))` |
+| Final answer streamed      | 190  | `planner.astream(messages)`         |
 
 ---
 

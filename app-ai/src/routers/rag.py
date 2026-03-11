@@ -115,13 +115,39 @@ async def ingest_document(
             # await = pause until the file bytes are fully read (non-blocking).
             # content is a `bytes` object (raw binary data).
 
-            text = content.decode("utf-8", errors="ignore")
-            # PYTHON CONCEPT — bytes.decode():
-            #   `content.decode("utf-8")` converts raw bytes → Python string.
-            #   errors="ignore" means: skip any characters that can't be decoded as UTF-8.
-            #   Without errors="ignore", binary files (PDFs with embedded images)
-            #   would raise a UnicodeDecodeError.
-            #   In TypeScript: Buffer.from(content).toString("utf-8")
+            # Step 3b: Extract text based on file type.
+            #
+            # WHY NOT just content.decode("utf-8")?
+            #   PDFs are BINARY files — they contain fonts, images, and compressed
+            #   streams alongside text. Decoding them as UTF-8 produces mostly garbage
+            #   because bytes() silently discards non-UTF-8 bytes (errors="ignore"),
+            #   leaving almost no readable text. Milvus then stores empty chunks,
+            #   so RAG retrieval finds nothing.
+            #
+            #   The fix: detect PDF files and use a proper PDF parser (pypdf)
+            #   to extract clean, readable text before chunking.
+
+            content_type = file.content_type or ""
+            filename_lower = (file.filename or "").lower()
+
+            if content_type == "application/pdf" or filename_lower.endswith(".pdf"):
+                # ── PDF extraction via pypdf ──────────────────────────────────
+                # pypdf reads the binary PDF format and extracts the text
+                # from each page, returning clean Unicode strings.
+                import io
+                from pypdf import PdfReader
+                # io.BytesIO wraps raw bytes as a file-like object,
+                # so PdfReader can read it without needing a real file path.
+                reader = PdfReader(io.BytesIO(content))
+                # reader.pages = list of page objects; .extract_text() returns
+                # the plain text of that page (or empty string if image-only).
+                pages_text = [page.extract_text() or "" for page in reader.pages]
+                text = "\n\n".join(pages_text)
+                print(f"Extracted {len(pages_text)} pages from PDF, total {len(text)} characters, {text}")
+                # Join pages with double newlines so chunk boundaries are clean.
+            else:
+                # Plain text / Markdown / other text-based formats
+                text = content.decode("utf-8", errors="ignore")
 
             # Step 4: Import processing dependencies inside the function.
             # PYTHON CONCEPT — deferred import (see web_search.py for explanation):
