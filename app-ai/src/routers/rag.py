@@ -39,6 +39,11 @@ import uuid
 # Used here to create a unique job_id for each ingestion request.
 # In Node.js: crypto.randomUUID() or the uuid npm package.
 
+from src.rag.milvus_utils import ensure_collection
+# ensure_collection(client, name) creates the Milvus collection with the
+# standard schema if it doesn't exist yet. Shared across retriever, ingest,
+# and vector memory to avoid duplicating the schema/index setup code.
+
 router = APIRouter(prefix="/v1")
 # All routes in this file are accessible under /v1/...
 
@@ -142,28 +147,7 @@ async def ingest_document(
             )
 
             # Create the collection if it doesn't exist yet (Milvus Lite on first ingest).
-            if not client.has_collection(settings.milvus_collection_knowledge):
-                from src.rag.embeddings import EmbeddingClient as _EC
-                from pymilvus import DataType
-
-                # Use explicit schema so auto_id=True is guaranteed.
-                # The simple create_collection(dimension=...) shorthand ignores auto_id
-                # in pymilvus 2.6.x, causing: "Insert missed an field `id`".
-                schema = MilvusClient.create_schema(
-                    auto_id=True,
-                    enable_dynamic_field=True,
-                )
-                schema.add_field("id", DataType.INT64, is_primary=True, auto_id=True)
-                schema.add_field("vector", DataType.FLOAT_VECTOR, dim=_EC.DIMENSIONS)
-
-                index_params = client.prepare_index_params()
-                index_params.add_index(field_name="vector", metric_type="COSINE")
-
-                client.create_collection(
-                    collection_name=settings.milvus_collection_knowledge,
-                    schema=schema,
-                    index_params=index_params,
-                )
+            ensure_collection(client, settings.milvus_collection_knowledge)
 
             # Step 8: For each chunk, embed it and store it in Milvus.
             for chunk in chunks:

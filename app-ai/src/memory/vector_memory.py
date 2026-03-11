@@ -35,6 +35,11 @@ from src.rag.embeddings import EmbeddingClient
 # EmbeddingClient wraps OpenAI's embedding API.
 # Memory chunks are stored as vectors (same technique as RAG).
 
+from src.rag.milvus_utils import ensure_collection
+# ensure_collection(client, name) creates the Milvus collection with the
+# standard schema if it doesn't exist yet. Shared across retriever, ingest,
+# and vector memory to avoid duplicating the schema/index setup code.
+
 from src.config.settings import settings
 # settings = singleton Settings for milvus_host, milvus_port, collection names.
 
@@ -116,22 +121,7 @@ class VectorMemory:
             )
 
             # Create the collection on first use if it doesn't exist yet.
-            # Use explicit schema — pymilvus 2.6.x shorthand ignores auto_id=True.
-            if not client.has_collection(self.COLLECTION):
-                from pymilvus import DataType
-                schema = MilvusClient.create_schema(
-                    auto_id=True,
-                    enable_dynamic_field=True,
-                )
-                schema.add_field("id", DataType.INT64, is_primary=True, auto_id=True)
-                schema.add_field("vector", DataType.FLOAT_VECTOR, dim=EmbeddingClient.DIMENSIONS)
-                index_params = client.prepare_index_params()
-                index_params.add_index(field_name="vector", metric_type="COSINE")
-                client.create_collection(
-                    collection_name=self.COLLECTION,
-                    schema=schema,
-                    index_params=index_params,
-                )
+            ensure_collection(client, self.COLLECTION)
 
             # Step 1: Embed the current query to find relevant memories.
             # await pauses until OpenAI returns the embedding vector.
@@ -219,22 +209,7 @@ class VectorMemory:
             )
 
             # Create the collection on first use if it doesn't exist yet.
-            # Use explicit schema — pymilvus 2.6.x shorthand ignores auto_id=True.
-            if not client.has_collection(self.COLLECTION):
-                from pymilvus import DataType
-                schema = MilvusClient.create_schema(
-                    auto_id=True,
-                    enable_dynamic_field=True,
-                )
-                schema.add_field("id", DataType.INT64, is_primary=True, auto_id=True)
-                schema.add_field("vector", DataType.FLOAT_VECTOR, dim=EmbeddingClient.DIMENSIONS)
-                index_params = client.prepare_index_params()
-                index_params.add_index(field_name="vector", metric_type="COSINE")
-                client.create_collection(
-                    collection_name=self.COLLECTION,
-                    schema=schema,
-                    index_params=index_params,
-                )
+            ensure_collection(client, self.COLLECTION)
 
             # Step 1: Embed the memory content for vector storage.
             # This embedding is what Milvus searches against later in recall().
