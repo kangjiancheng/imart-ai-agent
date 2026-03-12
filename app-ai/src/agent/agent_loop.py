@@ -157,6 +157,16 @@ async def run(request: AgentRequest):
                 "Anthropic service is temporarily unavailable (503). "
                 "Please try again in a moment."
             ) from exc
+        except anthropic.BadRequestError as exc:
+            # 400 = the messages array we built violates the Anthropic API contract.
+            # The most common cause: a tool_use block exists without a matching tool_result
+            # in the very next message (e.g. corrupted conversation history from the client).
+            # We surface a clear error instead of letting a raw HTTP 400 propagate as a 500.
+            raise RuntimeError(
+                "The conversation history sent to Claude was malformed "
+                "(a tool_use block had no matching tool_result). "
+                "Please start a new chat session."
+            ) from exc
 
         # ainvoke() = "async invoke" — send ALL messages to Claude, wait for the FULL response.
         # We need the FULL response here (not streaming) because we have to READ
@@ -215,65 +225,72 @@ async def run(request: AgentRequest):
             # After streaming the full answer, exit the loop — we're done.
 
         # ── Tool execution ────────────────────────────────────────────────────
-        # Claude wants to call a tool. Extract which tool and what arguments.
-        tool_call = response.tool_calls[0]
-        # We only process the first tool call per iteration (one at a time).
-        # Multi-tool calling in parallel is a Phase 2 / LangGraph feature.
+        # Claude may request ONE or MORE tools in a single response.
+        # The Anthropic API requires a tool_result for EVERY tool_use block —
+        # if any tool_use id is left without a matching tool_result, the next
+        # request is rejected with a 400 Bad Request error.
+        # So we loop over ALL tool_calls and collect all results before
+        # appending anything to messages.
 
-        tool_name = tool_call["name"]   # e.g. "calculator"
-        tool_args = tool_call["args"]   # e.g. {"expression": "15 * 1.08"}
+        tool_results: list[tuple[dict, str]] = []
+        # Each entry: (tool_call dict, result string)
 
-        if tool_name == "rag_retrieve":
-            # RAG is a special case — we handle it via RAGRetriever, not the tool_map.
-            # Why? Because RAGRetriever.retrieve() is async (awaitable), and the
-            # @tool stub in registry.py is just a placeholder so Claude knows the name.
-            retriever = RAGRetriever()
-            docs      = await retriever.retrieve(tool_args.get("query", request.message))
-            result    = retriever.format_for_prompt(docs)
-            # result = a formatted string like:
-            #   "[Document 1 — source: policy.pdf]\n... content ..."
-        else:
-            # Look up the tool in the tool_map dict by its name string.
-            tool = tool_map.get(tool_name)
-            if tool is None:
-                # Claude hallucinated a tool name that doesn't exist.
-                # Return an error observation — the LLM will see this and recover.
-                result = f"Error: unknown tool '{tool_name}'"
+        for tool_call in response.tool_calls:
+            tool_name = tool_call["name"]   # e.g. "calculator"
+            tool_args = tool_call["args"]   # e.g. {"expression": "15 * 1.08"}
+
+            if tool_name == "rag_retrieve":
+                # RAG is a special case — we handle it via RAGRetriever, not the tool_map.
+                # Why? Because RAGRetriever.retrieve() is async (awaitable), and the
+                # @tool stub in registry.py is just a placeholder so Claude knows the name.
+                retriever = RAGRetriever()
+                docs      = await retriever.retrieve(tool_args.get("query", request.message))
+                result    = retriever.format_for_prompt(docs)
+                # result = a formatted string like:
+                #   "[Document 1 — source: policy.pdf]\n... content ..."
             else:
-                try:
-                    result = await tool.ainvoke(tool_args)
-                    # ainvoke() on a @tool = execute the tool function with the args dict.
-                    # e.g. calculator.ainvoke({"expression": "15 * 1.08"}) → "16.2"
-                except Exception as e:
-                    result = f"Error: {tool_name} failed — {str(e)}"
-                    # Tool errors become observations rather than crashing the loop.
-                    # Claude sees the error message and decides what to do next
-                    # (try a different approach, use a different tool, or give up).
+                # Look up the tool in the tool_map dict by its name string.
+                tool = tool_map.get(tool_name)
+                if tool is None:
+                    # Claude hallucinated a tool name that doesn't exist.
+                    # Return an error observation — the LLM will see this and recover.
+                    result = f"Error: unknown tool '{tool_name}'"
+                else:
+                    try:
+                        result = await tool.ainvoke(tool_args)
+                        # ainvoke() on a @tool = execute the tool function with the args dict.
+                        # e.g. calculator.ainvoke({"expression": "15 * 1.08"}) → "16.2"
+                    except Exception as e:
+                        result = f"Error: {tool_name} failed — {str(e)}"
+                        # Tool errors become observations rather than crashing the loop.
+                        # Claude sees the error message and decides what to do next
+                        # (try a different approach, use a different tool, or give up).
 
-        iterations.append({
-            "tool":   tool_name,
-            "args":   tool_args,
-            "result": str(result),
-        })
-        # Log this iteration for the memory write step after streaming finishes.
+            tool_results.append((tool_call, str(result)))
+            iterations.append({
+                "tool":   tool_name,
+                "args":   tool_args,
+                "result": str(result),
+            })
+            # Log this iteration for the memory write step after streaming finishes.
 
-        # Feed the result back so the planner sees it on the NEXT iteration.
+        # Feed ALL results back so the planner sees them on the NEXT iteration.
         messages.append(response)
         # ↑ IMPORTANT: append the FULL Claude response (not just the text).
-        #   The response object carries the tool_call inside it.
-        #   The Anthropic API requires the assistant turn BEFORE the tool result.
+        #   The response object carries ALL tool_calls inside it.
+        #   The Anthropic API requires the assistant turn BEFORE the tool results.
 
-        messages.append(ToolMessage(content=str(result), tool_call_id=tool_call["id"]))
-        # ↑ ToolMessage = Claude's version of "here is the tool result".
-        #   tool_call_id MUST match the "id" from the tool_call above.
-        #   The Anthropic API validates this pairing — wrong id = 500 error.
-        #   Think of it like a request/response pair: id links them together.
+        for tool_call, result in tool_results:
+            messages.append(ToolMessage(content=result, tool_call_id=tool_call["id"]))
+        # ↑ One ToolMessage per tool_call — ids must match 1-to-1.
+        #   The Anthropic API validates every pairing — missing any = 400 error.
+        #   Think of it like request/response pairs: each id links them together.
         #
-        # After appending both, the messages list looks like:
+        # After appending, the messages list looks like:
         #   [..., HumanMessage("What is 15% of 340?"),
-        #         AIMessage(tool_calls=[{name: calculator, ...}]),   ← just appended
-        #         ToolMessage("51.0", tool_call_id="tc_001")]        ← just appended
-        # On the next iteration, Claude sees all of this and can reason about the result.
+        #         AIMessage(tool_calls=[{name: calculator, ...}]),   ← appended once
+        #         ToolMessage("51.0", tool_call_id="tc_001")]        ← one per tool_call
+        # On the next iteration, Claude sees all of this and can reason about the results.
 
     # ── Step 5: write to long-term memory ────────────────────────────────────
     # This runs AFTER the streaming is done. We never write memory DURING the loop
