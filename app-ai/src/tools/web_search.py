@@ -72,7 +72,10 @@ def web_search(query: str) -> str:
     #   Claude receives the error string as the tool result and can tell the user
     #   "Web search is not configured" rather than the agent crashing with a 500.
     if not settings.tavily_api_key:
-        return "Web search is not configured (TAVILY_API_KEY missing)."
+        # Return a generic message — do NOT reveal internal tool names or env var names.
+        # Claude reads this as a ToolMessage and will rephrase it for the user.
+        # "TAVILY_API_KEY missing" would leak internal architecture details.
+        return "Live web search is currently unavailable."
 
     # ── Try/except: graceful failure ──────────────────────────────────────
     # PYTHON CONCEPT — try/except:
