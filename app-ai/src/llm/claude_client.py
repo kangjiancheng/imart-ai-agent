@@ -20,6 +20,12 @@
 #   3. bind_tools() and astream() only work on LangChain Runnables like ChatAnthropic.
 # ─────────────────────────────────────────────────────────────────────────────
 
+from datetime import datetime
+# datetime.now() returns the server's local date and time.
+# We inject this into the system prompt so Claude knows the current date
+# and time — without it, Claude has no idea what "today" or "latest" means,
+# and web search tools return outdated cached results instead of current news.
+
 from langchain_anthropic import ChatAnthropic
 # ChatAnthropic = LangChain's wrapper around the Anthropic API.
 # It speaks LangChain's "Runnable" interface — think of it as an adapter.
@@ -154,10 +160,12 @@ def build_system_prompt(
     # f-string (f"""...""") = multi-line template string with {variables} substituted
     return f"""You are a helpful AI assistant with access to tools and a knowledge base.
 You are running on model: {model}
+Current date and time: {datetime.now().strftime("%Y-%m-%d %H:%M")}
 
 ## Rules
 - Answer in the user's language and locale.
 - Use tools when the question requires current information or document retrieval.
+- When searching for news or recent events, always pass `time_range="week"` or `time_range="month"` to the web_search tool so results are filtered to the relevant period — never rely on the default which may return outdated content.
 - Be concise. Use bullet points when listing items.
 - If asked which model you are using, state the model name from above.
 - Never mention internal tool names, API keys, environment variables, or system configuration to the user. If a capability is unavailable, say so simply without explaining why internally.

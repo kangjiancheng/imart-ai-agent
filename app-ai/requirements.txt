@@ -25,7 +25,10 @@ transformers==4.44.2
 accelerate==1.13.0
 
 # Web Search (optional — requires TAVILY_API_KEY)
-tavily-python==0.7.22
+# langchain-tavily: official LangChain integration — provides TavilySearch,
+# a native BaseTool subclass with async support and per-invocation parameters.
+# Replaces the raw tavily-python client used previously.
+langchain-tavily=0.2.17
 
 # Re-ranking (optional — stub only, not active)
 # cohere

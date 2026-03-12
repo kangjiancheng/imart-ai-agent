@@ -7,8 +7,8 @@
 # during the ReAct loop to answer questions that need current or recent information.
 #
 # WHAT IS A "TOOL" IN LANGCHAIN?
-#   A tool is a Python function that Claude can choose to call when it decides
-#   that information from outside its training data is needed.
+#   A tool is a Python function (or object) that Claude can choose to call when
+#   it decides that information from outside its training data is needed.
 #   Claude does NOT call the function directly — it returns a JSON "tool_call"
 #   object describing which tool to call and what arguments to pass.
 #   The agent loop reads that JSON and calls the actual Python function here.
@@ -16,129 +16,124 @@
 # HOW DOES CLAUDE KNOW THIS TOOL EXISTS?
 #   In registry.py, `TOOLS = [web_search, calculator, rag_retrieve]`.
 #   The LLM is initialized with `llm.bind_tools(TOOLS)`.
-#   LangChain reads the @tool decorator's docstring and type hints to build a
-#   JSON schema describing the tool. That schema is sent to Claude on every
-#   request so Claude knows what tools are available.
+#   LangChain reads each tool's name, description, and args schema to build a
+#   JSON schema that is sent to Claude on every request.
 #
 # WHY TAVILY (not Google or Bing)?
 #   Tavily is an AI-optimized search API that returns clean text snippets
 #   without HTML noise, ads, or pagination — perfect for LLM consumption.
-#   Requires a free TAVILY_API_KEY from tavily.com.
+#   It is also the officially recommended search tool by LangChain.
+#   Requires a free TAVILY_API_KEY from tavily.com (1,000 free searches/month).
+#
+# WHY langchain-tavily INSTEAD OF THE RAW tavily PACKAGE?
+#   The `langchain-tavily` package provides a `TavilySearch` class that is
+#   a proper LangChain BaseTool subclass. This means:
+#     - It supports native async (no extra wrapper needed)
+#     - The agent can dynamically set parameters per invocation
+#       (e.g., include_domains, time_range, search_depth)
+#     - It returns structured ToolMessage output, not raw JSON strings
+#     - It integrates with LangChain's tool-call flow without any glue code
 # ─────────────────────────────────────────────────────────────────────────────
 
-from langchain_core.tools import tool
-# @tool = a decorator from LangChain that transforms a plain Python function
-# into a LangChain Tool object. It auto-reads:
-#   - The function name → tool name Claude uses to call it ("web_search")
-#   - The docstring → tool description Claude reads to decide WHEN to use it
-#   - The type hints (query: str) → JSON schema Claude uses to structure its call
+import os
+# os.environ lets us inject the API key before TavilySearch reads it.
+# TavilySearch reads TAVILY_API_KEY from the environment at instantiation time.
+
+from langchain_core.tools import BaseTool
+# BaseTool is the abstract base class all LangChain tools inherit from.
+# We use it here only for the type hint on the factory function's return type.
 
 from src.config.settings import settings
 # settings = the singleton Settings instance from config/settings.py
-# Used here to read settings.tavily_api_key without re-reading .env
+# Used here to read settings.tavily_api_key without re-reading .env directly.
 
 
-# ── @tool decorator ───────────────────────────────────────────────────────────
-# PYTHON CONCEPT — decorators:
-#   A decorator is a function that WRAPS another function to add behavior.
-#   Syntax: @decorator_name above a function definition.
-#   `@tool` here transforms `web_search` from a plain function into a
-#   LangChain Tool object that has .name, .description, .args_schema, and .invoke().
-#   In TypeScript: similar to a class decorator or a HOF wrapper.
-#
-# WHAT THE DOCSTRING DOES:
-#   The docstring (the string between """) is NOT just documentation for humans.
-#   LangChain's @tool reads it and sends it to Claude as the tool description.
-#   Claude reads: "Search the web for current information, news, or recent events.
-#   Use when the question needs data that may not be in the knowledge base."
-#   and uses that to decide WHEN to call web_search vs rag_retrieve vs calculator.
-#   A better docstring = better tool selection by Claude.
+def build_web_search_tool() -> BaseTool:
+    """
+    Factory function that creates and returns a configured TavilySearch tool.
 
-@tool
-def web_search(query: str) -> str:
-    """Search the web for current information, news, or recent events.
-    Use when the question needs data that may not be in the knowledge base."""
+    WHY A FACTORY FUNCTION?
+      TavilySearch reads TAVILY_API_KEY from os.environ at instantiation time.
+      By wrapping it in a function, we can:
+        1. Check if the key is configured before trying to import langchain-tavily.
+        2. Set os.environ["TAVILY_API_KEY"] right before instantiation.
+        3. Return a fallback @tool stub if Tavily is unavailable, so the rest
+           of the app (registry.py, agent loop) doesn't need to change.
 
-    # ── Guard: check API key before importing the library ──────────────────
-    # PYTHON CONCEPT — truthiness check on string:
-    #   `if not settings.tavily_api_key` is True when:
-    #     - tavily_api_key is None (not set in .env)
-    #     - tavily_api_key is "" (empty string, our default in settings.py)
-    #   Both None and "" are "falsy" in Python (like null/undefined/"" in JS).
-    #   This guard prevents crashing if the user hasn't configured Tavily.
-    #
-    # EFFECT ON THE AGENT:
-    #   Returns an error string instead of raising an exception.
-    #   Claude receives the error string as the tool result and can tell the user
-    #   "Web search is not configured" rather than the agent crashing with a 500.
+    WHAT IS A "FACTORY FUNCTION"?
+      A factory function is a function whose job is to CREATE and return an object.
+      Instead of calling MyClass() directly, you call make_my_class() and let it
+      handle any setup logic before construction.
+      In TypeScript: a function that returns `new MyClass(...)` after some guards.
+    """
+
+    # ── Guard: check API key before trying to import the library ──────────────
+    # `if not settings.tavily_api_key` is True when:
+    #   - tavily_api_key is None (not set in .env)
+    #   - tavily_api_key is "" (empty string, the default in settings.py)
+    # Both None and "" are "falsy" in Python (like null/undefined/"" in JS).
+    # This guard prevents a confusing error from langchain-tavily about a
+    # missing API key and instead returns a safe fallback tool.
     if not settings.tavily_api_key:
-        # Return a generic message — do NOT reveal internal tool names or env var names.
-        # Claude reads this as a ToolMessage and will rephrase it for the user.
-        # "TAVILY_API_KEY missing" would leak internal architecture details.
-        return "Live web search is currently unavailable."
+        # ── Fallback: return a stub @tool if Tavily is not configured ─────────
+        # PYTHON CONCEPT — importing inside a branch:
+        #   We only import `tool` here because this branch is rarely taken.
+        #   The main path (below) uses TavilySearch directly without @tool.
+        from langchain_core.tools import tool
 
-    # ── Try/except: graceful failure ──────────────────────────────────────
-    # PYTHON CONCEPT — try/except:
-    #   Same as try/catch in JavaScript.
-    #   Any exception raised inside `try` is caught by `except`.
-    #   `Exception as e` binds the exception object to variable `e`.
-    #
-    # WHY RETURN A STRING INSTEAD OF RAISING?
-    #   This is a deliberate design choice: tool errors should NEVER crash the loop.
-    #   If web search fails (network timeout, API quota exceeded, etc.),
-    #   Claude receives the error string as the tool result.
-    #   Claude can then decide to try another tool or answer from its own knowledge.
-    #   Raising an exception would terminate the entire agent loop and return 500.
-    try:
-        # PYTHON CONCEPT — deferred / local import:
-        #   `from tavily import TavilyClient` is inside the function body, not at
-        #   the top of the file. This is called a "deferred import" or "local import".
-        #   Why? If tavily is not installed, importing at module load time would crash
-        #   the entire app on startup. Importing here means the error only triggers
-        #   when this function is actually called, and the try/except catches it.
-        #   In production, tavily should be in requirements.txt and always available.
-        from tavily import TavilyClient
+        @tool
+        def web_search(query: str) -> str:  # noqa: ARG001
+            """Search the web for current information, news, or recent events.
+            Use when the question needs data that may not be in the knowledge base."""
+            # `query` is intentionally unused — this is a stub that fires when
+            # TAVILY_API_KEY is not configured. The parameter must stay in the
+            # signature so LangChain builds the correct JSON schema for Claude.
+            # Return a generic message — do NOT reveal internal config details
+            # like env var names or library names. Claude will rephrase this
+            # as a user-friendly message.
+            return "Live web search is currently unavailable."
 
-        # Create a Tavily client with our API key
-        client = TavilyClient(api_key=settings.tavily_api_key)
+        return web_search
 
-        # Perform the search — max_results=3 keeps the context window small
-        # results is a dict: { "results": [ { "content": "...", "url": "..." }, ... ] }
-        results = client.search(query=query, max_results=3)
+    # ── Inject API key into environment for TavilySearch ──────────────────────
+    # TavilySearch (and most LangChain community tools) read credentials from
+    # os.environ at __init__ time. Setting it here ensures Tavily always gets
+    # the key from our settings singleton, which already read from .env.
+    os.environ["TAVILY_API_KEY"] = settings.tavily_api_key
 
-        # ── List comprehension to extract text snippets ──────────────────
-        # PYTHON CONCEPT — list comprehension:
-        #   [expression for item in iterable]
-        #   = build a new list by applying `expression` to each `item`.
-        #
-        #   `[r.get("content", "") for r in results.get("results", [])]`
-        #   Breakdown:
-        #     results.get("results", [])
-        #       = read the "results" key from the dict; if missing, use []
-        #       .get(key, default) is safer than results["results"] because it
-        #       won't crash if the key doesn't exist.
-        #     for r in ...
-        #       = iterate over each result dict in the list
-        #     r.get("content", "")
-        #       = read the "content" field from this result; if missing, use ""
-        #   Result: a list of text strings, one per search result.
-        #   In TypeScript: results?.results?.map(r => r.content ?? "") ?? []
-        snippets = [r.get("content", "") for r in results.get("results", [])]
+    # ── Import and instantiate TavilySearch ───────────────────────────────────
+    # PYTHON CONCEPT — deferred / local import:
+    #   The import is inside the function body rather than at the top of the file.
+    #   Why? If `langchain-tavily` is not installed, a top-level import would crash
+    #   the entire app at startup. A local import only fails when this function is
+    #   called, and only affects this tool — not the whole app.
+    #   In production, langchain-tavily should be in requirements.txt.
+    from langchain_tavily import TavilySearch
 
-        # ── Join snippets and handle empty case ──────────────────────────
-        # "\n\n".join(snippets)
-        #   = concatenate all snippets with a blank line between each.
-        #   In TypeScript: snippets.join("\n\n")
-        #
-        # `or "No results found."` — Python boolean short-circuit:
-        #   If join() returns an empty string "" (falsy), Python evaluates the
-        #   right side and returns "No results found." instead.
-        #   In TypeScript: snippets.join("\n\n") || "No results found."
-        return "\n\n".join(snippets) or "No results found."
+    # TavilySearch is a LangChain BaseTool subclass (not a raw function).
+    # Parameters set here are the DEFAULTS for every invocation.
+    # The agent can still OVERRIDE: include_domains, exclude_domains,
+    # time_range, search_depth, and include_images per query.
+    # Parameters that CANNOT be overridden at invocation time (they affect
+    # response size and could cause context window issues):
+    #   - include_answer
+    #   - include_raw_content
+    tool = TavilySearch(
+        max_results=5,          # Return up to 5 search results per query
+        topic="general",        # "general" | "news" | "finance"
+        search_depth="basic",   # "basic" = 1 API credit, "advanced" = 2 credits
+        include_answer=False,   # Don't include Tavily's own AI-generated answer
+        include_raw_content=False,  # Don't include full HTML — keeps context small
+        include_images=False,   # No images — this is a text-only agent
+    )
 
-    except Exception as e:
-        # f-string = Python's template literal syntax (same as JS template literals).
-        # f"Web search failed: {str(e)}"
-        #   str(e) converts the exception object to a readable error message string.
-        # Claude receives this string as the tool result and handles it gracefully.
-        return f"Web search failed: {str(e)}"
+    return tool
+
+
+# ── Module-level tool instance ────────────────────────────────────────────────
+# PYTHON CONCEPT — module-level execution:
+#   Code at the top level of a module runs ONCE when the module is first imported.
+#   `web_search` is created here so registry.py can import it with:
+#       from src.tools.web_search import web_search
+#   The factory handles all guards and fallbacks, so registry.py stays clean.
+web_search = build_web_search_tool()

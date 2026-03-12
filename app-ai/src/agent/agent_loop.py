@@ -243,6 +243,7 @@ async def run(request: AgentRequest):
         tool_results: list[tuple[dict, str]] = []
         # Each entry: (tool_call dict, result string)
 
+        print(f"Iteration {i+1} tool calls:", response.tool_calls)
         for tool_call in response.tool_calls:
             tool_name = tool_call["name"]   # e.g. "calculator"
             tool_args = tool_call["args"]   # e.g. {"expression": "15 * 1.08"}
