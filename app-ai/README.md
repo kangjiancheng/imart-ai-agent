@@ -2,7 +2,7 @@
 
 AI agent microservice for the app platform. Built with FastAPI and LangChain, powered by Claude (Anthropic). Exposes a streaming SSE endpoint that NestJS calls to handle user AI requests.
 
-This installs FastAPI, LangChain, Milvus, BGE-M3 (FlagEmbedding via ModelScope), PyMuPDF,TAVILY and all transitive dependencies.
+This installs FastAPI, LangChain, Milvus (via docker), BGE-M3 (FlagEmbedding via ModelScope), PyMuPDF, TAVILY.
 
 ### What it does
 
@@ -57,7 +57,7 @@ Then open: http://localhost:8000/docs
 | ~4 GB free disk | Yes         | BGE-M3 model weights (~2.3 GB) downloaded on first start            |
 | ~1 GB free RAM  | Yes         | BGE-M3 runs with fp16 — loads at server startup (~30–60s first run) |
 
-### 1. Python version
+### 1. Install Python
 
 **Option A — pyenv (recommended)**
 
@@ -72,12 +72,13 @@ python --version                   # → Python 3.12.13
 
 ```bash
 brew install python@3.12
-echo 'export PATH="/opt/homebrew/opt/python@3.12/libexec/bin:$PATH"' >> ~/.zshrc
-source ~/.zshrc
+# if python --version error, run the following command
+# echo 'export PATH="/opt/homebrew/opt/python@3.12/libexec/bin:$PATH"' >> ~/.zshrc
+# source ~/.zshrc
 python --version                   # → Python 3.12.x
 ```
 
-### 2. Virtual environment
+### 2. Set Virtual environment
 
 ```bash
 cd app-ai
@@ -143,7 +144,11 @@ curl -sfL https://raw.githubusercontent.com/milvus-io/milvus/master/scripts/stan
 # First run — pulls the Milvus image and starts the container (sudo required)
 bash standalone_embed.sh start
 # → waits until container is healthy (~30s)
+```
 
+more base:
+
+```bash
 # Check container is running
 docker ps | grep milvus-standalone
 
@@ -260,8 +265,6 @@ app-ai/
 ├── .env.example                       Template for .env — commit this, never commit .env
 └── Dockerfile                         Container image for deployment
 ```
-
----
 
 ## How files work together
 
