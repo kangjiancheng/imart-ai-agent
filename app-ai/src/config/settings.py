@@ -116,6 +116,18 @@ class Settings(BaseSettings):
         # Also read from a .env file in the project root (for local development).
         # In production, real environment variables take priority over the .env file.
 
+        extra = "ignore"
+        # PYTHON CONCEPT — extra = "ignore":
+        #   By default, pydantic raises a ValidationError if .env contains a variable
+        #   that has no matching field in this class (extra="forbid" is the default).
+        #   `extra = "ignore"` tells pydantic to silently skip unknown variables.
+        #
+        #   WHY THIS IS SAFE:
+        #   Settings is a read-only config object. Unknown env vars don't get stored anywhere.
+        #   We just want app-level variables (API keys, URIs) — anything else (e.g.
+        #   TOKENIZERS_PARALLELISM, PATH, HOME) should be ignored, not cause a crash.
+        #   This matches the behavior of most other frameworks (NestJS ConfigModule, dotenv).
+
 
 # ── Module-level singleton ────────────────────────────────────────────────────
 # Instantiate Settings() ONCE when this module first imports.

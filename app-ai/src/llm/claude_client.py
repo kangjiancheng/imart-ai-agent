@@ -93,28 +93,63 @@ def build_messages(system_prompt: str, history: list[dict]) -> list[BaseMessage]
     # Claude reads this list top-to-bottom like a chat transcript.
 
 
-def build_system_prompt(recalled_memory: list[str], model: str = settings.claude_model) -> str:
+def build_system_prompt(
+    recalled_memory: list[str],
+    model: str = settings.claude_model,
+    document_context: str | None = None,
+) -> str:
     """
     Assemble the system prompt string that tells Claude how to behave.
 
     The system prompt is injected at position 0 of every message list.
-    It sets Claude's identity, rules, and any long-term memory we recalled.
+    It sets Claude's identity, rules, long-term memory, and optionally
+    the text of an uploaded document.
 
-    recalled_memory = a list of strings pulled from Milvus, e.g.:
-      ["User prefers bullet points", "User works in finance sector"]
-    These are injected here so Claude "knows" this user before answering.
+    Parameters
+    ----------
+    recalled_memory : list[str]
+        Strings pulled from Milvus, e.g. ["User prefers bullet points"].
+        Injected so Claude "knows" this user before answering.
+        Omitted if empty (Milvus down or first session).
 
-    model = the Claude model ID from settings (e.g. "claude-sonnet-4-6").
-    Injected into the system prompt so Claude can answer "which model are you using?"
-    Claude does NOT know its own model ID by default — we must tell it explicitly.
+    model : str
+        The Claude model ID from settings (e.g. "claude-sonnet-4-6").
+        Injected so Claude can answer "which model are you using?".
+        Claude does NOT know its own model ID — we must tell it.
 
-    If recalled_memory is empty (Milvus down or first session), the section is omitted.
+    document_context : str | None
+        Plain text extracted from an uploaded file (PDF, DOCX, TXT, etc.).
+        When provided, Claude reads this text and can answer questions about it.
+        None = no document uploaded (normal text-only chat).
+
+    PYTHON CONCEPT — `str | None`:
+        This is Python 3.10+ union syntax meaning "either a str or None".
+        It is equivalent to `Optional[str]` from the `typing` module.
+        Callers that don't pass document_context get None by default.
     """
     memory_section = ""
     if recalled_memory:
         # f"- {m}" adds a bullet point before each memory chunk
         chunks = "\n".join(f"- {m}" for m in recalled_memory)
         memory_section = f"\n\n## What you know about this user\n{chunks}"
+
+    # Build an optional document section.
+    # When the user uploads a file, its extracted text goes here so Claude
+    # can read and reason about the entire document directly.
+    #
+    # WHY inject in the system prompt instead of the user message?
+    #   The system prompt is Claude's authoritative context — it stays at
+    #   position 0 and is never confused with the user's question.
+    #   Injecting here keeps the user's HumanMessage clean (just their question)
+    #   and makes it easy for Claude to cite "from the uploaded document…"
+    document_section = ""
+    if document_context:
+        document_section = (
+            f"\n\n## Uploaded Document\n"
+            f"The user has uploaded a file. Its full text is below.\n"
+            f"Use this content to answer the user's questions accurately.\n\n"
+            f"{document_context}"
+        )
 
     # f-string (f"""...""") = multi-line template string with {variables} substituted
     return f"""You are a helpful AI assistant with access to tools and a knowledge base.
@@ -126,5 +161,6 @@ You are running on model: {model}
 - Be concise. Use bullet points when listing items.
 - If asked which model you are using, state the model name from above.
 - Never mention internal tool names, API keys, environment variables, or system configuration to the user. If a capability is unavailable, say so simply without explaining why internally.
-{memory_section}"""
-    # {memory_section} = either empty string or the "## What you know about this user" block
+{memory_section}{document_section}"""
+    # {memory_section}  = either empty string or the "## What you know about this user" block
+    # {document_section} = either empty string or the "## Uploaded Document" block

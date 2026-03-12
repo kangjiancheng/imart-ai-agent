@@ -144,3 +144,19 @@ class AgentRequest(BaseModel):
     #   - Testing / curl requests where SSE parsing is inconvenient
     #   - Clients that can't consume EventSource (some serverless platforms)
     stream: bool = True
+
+    # document_context: plain text extracted from an uploaded file (optional).
+    #
+    # When set, the agent injects this text into Claude's system prompt under
+    # a "## Uploaded Document" section so Claude can read and reason about it.
+    #
+    # PYTHON CONCEPT — Optional field with None default:
+    #   `str | None = None` means the field can be a string OR None (null).
+    #   This is Python 3.10+ union syntax — equivalent to `Optional[str] = None`
+    #   from the `typing` module in older Python versions.
+    #   If not provided, Pydantic leaves it as None and the agent runs normally.
+    #
+    # This field is NOT sent by the JSON /v1/agent/chat endpoint.
+    # It is populated internally by the /v1/agent/chat-with-file endpoint
+    # after extracting text from the uploaded file, then passed to run().
+    document_context: str | None = None

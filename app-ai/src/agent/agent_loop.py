@@ -106,9 +106,17 @@ async def run(request: AgentRequest):
     # If Milvus is down, recall() returns [] — the loop still works without personalization.
 
     # ── Step 2: build initial message list ───────────────────────────────────
-    system_prompt = build_system_prompt(recalled)
+    system_prompt = build_system_prompt(
+        recalled,
+        document_context=request.document_context,
+    )
     # system_prompt = a big string telling Claude who it is, what rules to follow,
-    #                 and (optionally) what we know about this user from memory
+    #                 what we know about this user from memory, and (optionally)
+    #                 the full text of an uploaded document.
+    #
+    # request.document_context = None for normal text-only chats.
+    # When set (by /v1/agent/chat-with-file), its text is injected under
+    # a "## Uploaded Document" section so Claude can read and analyze it.
 
     messages = build_messages(system_prompt, [m.model_dump() for m in request.history])
     # m.model_dump() = convert each Pydantic HistoryMessage object → plain dict

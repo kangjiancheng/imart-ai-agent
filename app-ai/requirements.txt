@@ -46,5 +46,9 @@ pillow
 # NOTE: pdfplumber was tried but abandoned — pdfminer.six fails to decode Chinese CID
 #       fonts, returning \u0001 control characters instead of actual text.
 
+# DOCX parsing (for /v1/agent/chat-with-file direct document analysis)
+# python-docx reads paragraphs and tables from .docx files without binary dependencies.
+python-docx
+
 # Testing
 pytest

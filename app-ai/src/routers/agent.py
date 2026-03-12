@@ -30,6 +30,11 @@ from fastapi import APIRouter, HTTPException
 # APIRouter = creates a group of routes (like Express Router in Node.js)
 # HTTPException = raises an HTTP error response with a status code and message
 
+from fastapi import Form, UploadFile, File
+# Form      = marks a multipart form field (for /v1/agent/chat-with-file)
+# UploadFile = FastAPI's type for files uploaded via multipart/form-data
+# File(...)  = marks a form field as a required file upload
+
 from fastapi.responses import StreamingResponse, JSONResponse
 # StreamingResponse = a FastAPI response that streams data in chunks.
 # Instead of returning one big JSON body, it sends pieces one at a time.
@@ -55,6 +60,16 @@ from src.agent.agent_loop import run
 # run = the main async generator function that runs the ReAct agent loop.
 # It yields string tokens one-by-one as Claude generates the response.
 # See agent/agent_loop.py for full explanation.
+
+from src.schemas.request import AgentRequest, HistoryMessage, UserContext
+# AgentRequest  = Pydantic model for the incoming JSON body (text-only chat).
+# HistoryMessage, UserContext = sub-schemas needed to build AgentRequest manually
+#   for the multipart form endpoint (chat-with-file).
+
+from src.utils.file_parser import extract_text
+# extract_text(filename, bytes) → plain text from PDF / DOCX / TXT.
+# Used by /v1/agent/chat-with-file to turn the uploaded file into a string
+# that is injected into Claude's context window.
 
 
 # ── Module-level singletons ───────────────────────────────────────────────────
@@ -247,3 +262,181 @@ import json as _json
 class _UTF8JSONResponse(JSONResponse):
     def render(self, content) -> bytes:
         return _json.dumps(content, ensure_ascii=False).encode("utf-8")
+
+
+# ── POST /v1/agent/chat-with-file ─────────────────────────────────────────────
+# Chat endpoint that accepts a file upload alongside the user's message.
+# The file text is extracted and injected directly into Claude's context window
+# so Claude can read, summarize, or answer questions about the document.
+#
+# MULTIPART vs JSON:
+#   The regular /v1/agent/chat endpoint accepts a JSON body.
+#   JSON cannot carry binary data (files) — you'd have to base64-encode the file,
+#   which inflates size by ~33% and requires the client to encode it first.
+#   Multipart/form-data is the standard HTTP format for mixing text fields and
+#   binary file uploads in a single request. Browsers and NestJS both support it.
+#
+# HOW IT WORKS END-TO-END:
+#   1. NestJS sends multipart/form-data with: file + message + session_id + ...
+#   2. FastAPI receives each field separately (UploadFile + Form fields).
+#   3. We extract plain text from the file (PDF/DOCX/TXT via file_parser.py).
+#   4. We build a normal AgentRequest, setting document_context = extracted text.
+#   5. The agent loop reads document_context and injects it into Claude's system prompt.
+#   6. Claude can now read the full document and answer the user's question.
+#   7. We stream the response back as SSE (same format as /v1/agent/chat).
+#
+# PYTHON CONCEPT — Form() vs Body():
+#   In a JSON endpoint, FastAPI reads ALL parameters from the request body as one JSON object.
+#   In a multipart endpoint, each form field is a SEPARATE part of the request.
+#   You declare each field with `= Form(...)` so FastAPI knows to read it from the form,
+#   not from a JSON body. File fields use `= File(...)` instead.
+#   The `...` (Ellipsis) in both means the field is required — no default value.
+
+@router.post("/agent/chat-with-file")
+async def agent_chat_with_file(
+    # ── Required form fields ──────────────────────────────────────────────────
+    file: UploadFile = File(...),
+    # The uploaded document (PDF, DOCX, TXT, etc.).
+    # FastAPI reads this from the multipart "file" field.
+    # UploadFile gives us: .filename (str), .content_type (str), .read() (async)
+
+    message: str = Form(...),
+    # The user's question or instruction about the uploaded file.
+    # e.g. "Summarize this document" or "What are the key risks in this contract?"
+
+    user_id: str = Form(...),
+    # Same as AgentRequest.user_id — identifies the user for memory recall.
+
+    session_id: str = Form(...),
+    # Same as AgentRequest.session_id — used for logging / SSE correlation.
+
+    subscription_tier: str = Form(...),
+    # User's subscription level — passed to build_system_prompt via UserContext.
+
+    # ── Optional form fields (with defaults) ─────────────────────────────────
+    locale: str = Form("en-US"),
+    # User's locale for language preference. Defaults to "en-US" if not sent.
+
+    timezone: str = Form("UTC"),
+    # User's timezone for date/time context.
+
+    stream: bool = Form(True),
+    # True → stream SSE tokens (default).
+    # False → return a single JSON response with the full answer.
+
+    history_json: str = Form("[]"),
+    # Conversation history sent as a JSON *string* (not a nested object),
+    # because multipart forms don't support nested JSON objects natively.
+    #
+    # NestJS sends: history_json = '[{"role":"user","content":"Hi"},...]'
+    # We parse it with json.loads() below.
+    #
+    # PYTHON CONCEPT — Form fields are always strings:
+    #   Unlike JSON bodies where Pydantic can parse nested types directly,
+    #   multipart form fields arrive as strings. Complex types like lists must
+    #   be JSON-encoded by the sender and decoded manually by the receiver.
+    #   This is the standard pattern for sending structured data in form submissions.
+):
+    """
+    Upload a document and ask a question about it in one request.
+
+    Accepts multipart/form-data with:
+      - file:              the document file (PDF, DOCX, TXT, …)
+      - message:           the user's question or instruction
+      - user_id:           user identifier (for memory recall)
+      - session_id:        session identifier (for SSE correlation)
+      - subscription_tier: e.g. "free", "pro", "enterprise"
+      - locale:            e.g. "en-US" (optional, default "en-US")
+      - timezone:          e.g. "America/New_York" (optional, default "UTC")
+      - stream:            true/false (optional, default true)
+      - history_json:      JSON-encoded array of past messages (optional, default [])
+
+    Returns the same SSE stream format as POST /v1/agent/chat.
+    """
+    import json as _json_mod
+    # Import locally to keep the module-level namespace clean.
+
+    # ── Step 1: Extract text from the uploaded file ───────────────────────────
+    file_bytes = await file.read()
+    # await file.read() = async read — pause until all bytes are loaded.
+    # Returns raw bytes (binary data, not a string).
+
+    try:
+        document_text = extract_text(file.filename or "upload", file_bytes)
+        # extract_text() dispatches to the right parser based on file extension:
+        #   .pdf  → PyMuPDF (with OCR fallback for scanned pages)
+        #   .docx → python-docx (paragraphs + tables)
+        #   else  → UTF-8 decode
+        # Returns a plain string (may be capped at 80,000 characters).
+    except ValueError as exc:
+        # extract_text() raises ValueError for empty files or unsupported content.
+        raise HTTPException(status_code=422, detail=str(exc))
+
+    # ── Step 2: Parse the conversation history ────────────────────────────────
+    try:
+        raw_history: list[dict] = _json_mod.loads(history_json)
+        # json.loads() = parse JSON string → Python list of dicts.
+        # e.g. '[{"role":"user","content":"Hi"}]' → [{"role": "user", "content": "Hi"}]
+        history = [HistoryMessage(**h) for h in raw_history]
+        # HistoryMessage(**h) = unpack each dict into a Pydantic model.
+        # This validates that each item has role ("user"/"assistant") and content.
+        # PYTHON CONCEPT — ** (dict unpacking):
+        #   HistoryMessage(**{"role": "user", "content": "Hi"})
+        #   is the same as: HistoryMessage(role="user", content="Hi")
+    except Exception:
+        # If history_json is malformed (bad JSON or wrong shape), default to empty.
+        history = []
+
+    # ── Step 3: Build a standard AgentRequest with document_context ───────────
+    agent_request = AgentRequest(
+        user_id=user_id,
+        message=message,
+        history=history,
+        user_context=UserContext(
+            subscription_tier=subscription_tier,
+            locale=locale,
+            timezone=timezone,
+        ),
+        session_id=session_id,
+        stream=stream,
+        document_context=document_text,
+        # document_context carries the extracted file text into the agent loop.
+        # build_system_prompt() will inject it under "## Uploaded Document"
+        # so Claude can read and reason about the full document content.
+    )
+
+    # ── Step 4: Run guardrails on the user's message ──────────────────────────
+    # We run guardrails on the text message only (not the document content).
+    # The document is the user's own file — we trust it hasn't been injected.
+    guard_result = guardrails.check(agent_request.message)
+    if not guard_result.passed:
+        raise HTTPException(status_code=422, detail=guard_result.reason)
+    agent_request.message = guard_result.sanitized_message
+
+    # ── Step 5: Stream or return the agent response ───────────────────────────
+    # This mirrors the logic in agent_chat() above exactly.
+    if agent_request.stream:
+        async def token_stream():
+            try:
+                async for token in run(agent_request):
+                    if token:
+                        yield f"data: {_json.dumps({'type': 'token', 'content': token}, ensure_ascii=False)}\n\n"
+            except Exception as exc:
+                yield f"data: {_json.dumps({'type': 'error', 'message': str(exc)}, ensure_ascii=False)}\n\n"
+                return
+            yield f"data: {_json.dumps({'type': 'done'})}\n\n"
+
+        return StreamingResponse(
+            token_stream(),
+            media_type="text/event-stream",
+            headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+        )
+
+    # stream=False: collect all tokens, return single JSON response.
+    chunks: list[str] = []
+    async for token in run(agent_request):
+        if token:
+            chunks.append(token)
+    return _UTF8JSONResponse(
+        content={"type": "complete", "content": "".join(chunks)}
+    )
