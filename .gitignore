@@ -18,6 +18,9 @@ build/
 .ruff_cache/
 *.so
 
+# Milvus Docker volume data (etcd + minio + milvus)
+volumes/
+
 # milvus local db files (if you use milvus-lite for local development)
 milvus_local.db
 .milvus_local.db.lock
