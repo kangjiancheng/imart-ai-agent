@@ -2,34 +2,20 @@
 #
 # Brings up the full app-ai stack:
 #   app-ai  — FastAPI agent service (this repo)
+#   etcd    — metadata store for Milvus (external, production-ready)
+#   minio   — object storage for Milvus (S3-compatible, production-ready)
 #   milvus  — vector database for RAG knowledge_base + user_memory
-#   ollama  — local LLM server that serves the BGE-M3 embedding model
 #
-# EMBEDDING MODE — choose one before starting:
-#
-#   Mode A: FlagEmbedding (default, current implementation)
-#     BGE-M3 runs inside the app-ai container via PyTorch.
-#     The ollama service is still started but not used by the app.
-#     Model weights are cached in the bge_m3_cache volume (~2.3 GB).
-#     No code changes needed.
-#
-#   Mode B: Ollama (lighter app-ai container, future migration path)
-#     app-ai calls Ollama's HTTP API for embeddings instead of loading
-#     the model in-process. Requires updating src/rag/embeddings.py.
-#     See docs/agent-rag-embeddings.md for the Ollama variant code.
+# EMBEDDING MODE: FlagEmbedding (Mode A)
+#   BGE-M3 runs inside the app-ai container via PyTorch.
+#   Model weights are cached in the bge_m3_cache volume (~2.3 GB).
 #
 # QUICK START:
 #   cp .env.example .env        # fill in ANTHROPIC_API_KEY
 #   docker compose up -d        # starts all services
 #   docker compose logs -f app-ai  # watch startup (BGE-M3 load takes ~60s)
-#
-# MILVUS CONFIG FILES (required by milvus service):
-#   Run once to generate before `docker compose up`:
-#   bash standalone_embed.sh start && bash standalone_embed.sh stop
-#   This creates embedEtcd.yaml and user.yaml in the current directory.
 
 services:
-
   # ── app-ai: FastAPI agent service ─────────────────────────────────────────────
   app-ai:
     build:
@@ -37,8 +23,8 @@ services:
       dockerfile: Dockerfile
     container_name: app-ai
     ports:
-      - "8000:8000"     # expose for NestJS and local testing only
-                        # in production, route through Nginx — never expose publicly
+      - "8000:8000" # expose for NestJS and local testing only
+        # in production, route through Nginx — never expose publicly
     environment:
       # ── Required ──────────────────────────────────────────────────────────────
       ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY}
@@ -57,10 +43,6 @@ services:
       # ── Web search (optional) ─────────────────────────────────────────────────
       TAVILY_API_KEY: ${TAVILY_API_KEY:-}
 
-      # ── Ollama endpoint (for Mode B — Ollama embeddings) ──────────────────────
-      # Uncomment and update src/rag/embeddings.py to switch from FlagEmbedding.
-      # OLLAMA_BASE_URL: http://ollama:11434
-
     volumes:
       # BGE-M3 model cache — persists across container restarts.
       # snapshot_download() writes here on first start (~2.3 GB download, one-time).
@@ -69,104 +51,100 @@ services:
 
     depends_on:
       milvus:
-        condition: service_healthy   # wait for Milvus to pass its health check
-      ollama:
-        condition: service_healthy   # wait for Ollama API to be ready
-      ollama-init:
-        condition: service_completed_successfully  # wait for BGE-M3 pull to finish
+        condition: service_healthy # wait for Milvus to pass its health check
 
     restart: unless-stopped
 
+  # ── etcd: metadata store for Milvus ───────────────────────────────────────────
+  # External etcd — more reliable than embedded etcd for production use.
+  # Milvus uses etcd to store collection metadata, indexes, and cluster state.
+  etcd:
+    container_name: milvus-etcd
+    image: quay.io/coreos/etcd:v3.5.25
+    environment:
+      - ETCD_AUTO_COMPACTION_MODE=revision
+      - ETCD_AUTO_COMPACTION_RETENTION=1000
+      - ETCD_QUOTA_BACKEND_BYTES=4294967296
+      - ETCD_SNAPSHOT_COUNT=50000
+    volumes:
+      - etcd_data:/etcd
+    command: etcd -advertise-client-urls=http://etcd:2379 -listen-client-urls http://0.0.0.0:2379 --data-dir /etcd
+    healthcheck:
+      test: ["CMD", "etcdctl", "endpoint", "health"]
+      interval: 30s
+      timeout: 20s
+      retries: 3
+    restart: unless-stopped
+
+  # ── minio: object storage for Milvus ──────────────────────────────────────────
+  # MinIO stores Milvus segment data and index files (S3-compatible API).
+  # Replaces local filesystem storage used in the embedded etcd approach.
+  minio:
+    container_name: milvus-minio
+    image: minio/minio:RELEASE.2024-12-18T13-15-44Z
+    environment:
+      MINIO_ACCESS_KEY: minioadmin
+      MINIO_SECRET_KEY: minioadmin
+    ports:
+      - "9001:9001" # MinIO web console (http://localhost:9001)
+      - "9000:9000" # MinIO S3 API
+    volumes:
+      - minio_data:/minio_data
+    command: minio server /minio_data --console-address ":9001"
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9000/minio/health/live"]
+      interval: 30s
+      timeout: 20s
+      retries: 3
+    restart: unless-stopped
+
   # ── milvus: vector database ───────────────────────────────────────────────────
-  # Standalone mode — single-node Milvus with embedded etcd and local storage.
+  # Standalone mode — uses external etcd + MinIO (production-ready).
   # Same version as standalone_embed.sh (v2.6.11) for consistency.
   #
   # Stores two collections:
   #   knowledge_base — RAG document chunks (shared across all users)
   #   user_memory    — per-user long-term memory (filtered by user_id)
   milvus:
-    image: milvusdb/milvus:v2.6.11
     container_name: milvus-standalone
-    command: milvus run standalone
+    image: milvusdb/milvus:v2.6.11
+    command: ["milvus", "run", "standalone"]
     security_opt:
-      - seccomp:unconfined    # required by Milvus embedded etcd on Linux
+      - seccomp:unconfined # required by Milvus on Linux
     environment:
-      ETCD_USE_EMBED: "true"
-      ETCD_DATA_DIR: /var/lib/milvus/etcd
-      ETCD_CONFIG_PATH: /milvus/configs/embedEtcd.yaml
-      COMMON_STORAGETYPE: local
-      DEPLOY_MODE: STANDALONE
+      ETCD_ENDPOINTS: etcd:2379
+      MINIO_ADDRESS: minio:9000
+      MQ_TYPE: woodpecker
     ports:
-      - "19530:19530"   # gRPC — pymilvus connects here
-      - "9091:9091"     # HTTP management API + health endpoint
+      - "19530:19530" # gRPC — pymilvus connects here
+      - "9091:9091" # HTTP management API + health endpoint
     volumes:
       - milvus_data:/var/lib/milvus
-      # Config files generated by standalone_embed.sh — run it once before compose up.
-      - ./embedEtcd.yaml:/milvus/configs/embedEtcd.yaml
-      - ./user.yaml:/milvus/configs/user.yaml
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:9091/healthz"]
       interval: 30s
-      timeout: 10s
-      start_period: 90s   # Milvus takes ~60s to initialise embedded etcd
+      timeout: 20s
+      start_period: 90s # Milvus takes ~60s to initialise
       retries: 3
-    restart: unless-stopped
-
-  # ── ollama: local LLM + embedding server ──────────────────────────────────────
-  # Serves BGE-M3 embeddings via REST API at http://ollama:11434.
-  #
-  # Used by app-ai in Mode B (Ollama embeddings).
-  # In Mode A (FlagEmbedding), this service is still started but not called by
-  # the app — you can comment it out along with ollama-init if not needed.
-  #
-  # API endpoint for embeddings:
-  #   POST http://ollama:11434/api/embeddings
-  #   {"model": "bge-m3", "prompt": "your text here"}
-  ollama:
-    image: ollama/ollama
-    container_name: ollama
-    ports:
-      - "11434:11434"   # expose for local testing and app-ai access
-    volumes:
-      # Model weights persist across restarts (~2.3 GB for bge-m3).
-      # Docker pulls the model once via ollama-init; subsequent starts load from here.
-      - ollama_data:/root/.ollama
-    healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:11434"]
-      interval: 30s
-      timeout: 10s
-      start_period: 30s
-      retries: 3
-    restart: unless-stopped
-
-  # ── ollama-init: pull BGE-M3 into ollama on first run ────────────────────────
-  # This one-shot service runs after ollama is healthy and pulls the BGE-M3 model.
-  # On subsequent `docker compose up` calls, the model already exists in the
-  # ollama_data volume — ollama pull is a no-op (instant).
-  #
-  # OLLAMA_HOST tells the Ollama CLI to connect to the sibling service, not localhost.
-  # restart: "no" ensures this service runs once and exits — it is not restarted.
-  ollama-init:
-    image: ollama/ollama
-    container_name: ollama-init
     depends_on:
-      ollama:
+      etcd:
         condition: service_healthy
-    environment:
-      OLLAMA_HOST: http://ollama:11434
-    entrypoint: ["ollama", "pull", "bge-m3"]
-    restart: "no"
+      minio:
+        condition: service_healthy
+    restart: unless-stopped
 
 # ── Named volumes ─────────────────────────────────────────────────────────────
 volumes:
+  etcd_data:
+    # etcd metadata — Milvus collection schemas, index configs, cluster state.
+
+  minio_data:
+    # MinIO object storage — Milvus segment data and index files.
+
   milvus_data:
-    # Milvus vector store — knowledge_base + user_memory collections.
+    # Milvus runtime data.
     # Delete to reset all stored documents and memories:
     #   docker compose down -v
-
-  ollama_data:
-    # Ollama model weights — bge-m3 (~2.3 GB).
-    # Shared between ollama and ollama-init services.
 
   bge_m3_cache:
     # ModelScope cache for BGE-M3 used by FlagEmbedding (Mode A).

@@ -13,23 +13,31 @@ This installs FastAPI, LangChain, Milvus (via docker), BGE-M3 (FlagEmbedding via
 - Maintains **per-user long-term memory** across sessions using vector embeddings
 - Enforces a **guardrail pipeline** on every message before Claude sees anything
 
-## Daily workflow
+## Daily Development
+
+**Prerequisite**
+
+1. set up the `.env` for claude api key、milvus service、tavily api key
+2. install and run milvus via docker compose: `curl -sfL https://github.com/milvus-io/milvus/releases/download/v2.6.11/milvus-standalone-docker-compose.yml -O docker-compose.yml`
+
+**Start**
 
 ```bash
-# Start Docker Milvus if set the env configure for milvus server
-bash standalone_embed.sh start     # requires sudo password
+# start milvus
+docker compose -f milvus-standalone-docker-compose.yml up -d
+# docker compose -f milvus-standalone-docker-compose.yml ps
 
-cd app-ai
-
- # Set Up a Virtual Environment
+# set python virtual environment
 python -m venv venv
 
- # stop: deactivate
+# activate the virtual environment
 source venv/bin/activate
+# exit: deactivate
 
 # Install Required Dependencies
 pip install -r requirements.txt
 
+# start project
 uvicorn src.main:app --reload --port 8000
 ```
 
@@ -43,6 +51,46 @@ Then open: http://localhost:8000/docs
 | http://localhost:8000/redoc  | ReDoc API reference                           |
 | http://localhost:8000/health | `{"status": "ok", "service": "app-ai"}`       |
 | http://localhost:8000/info   | Service config (model, max_tokens, embedding) |
+
+**Docker Compose**
+
+1. Start (what you have):
+
+```bash
+docker compose -f milvus-standalone-docker-compose.yml up -d
+```
+
+2. Stop (keeps data volumes):
+
+```bash
+docker compose -f milvus-standalone-docker-compose.yml down
+```
+
+3. Stop + delete all data (wipes etcd + minio + milvus volumes):
+
+```bash
+docker compose -f milvus-standalone-docker-compose.yml down -v
+```
+
+4. View logs (all services):
+
+```bash
+docker compose -f milvus-standalone-docker-compose.yml logs -f
+```
+
+5.View logs (specific service only):
+
+```bash
+docker compose -f milvus-standalone-docker-compose.yml logs -f standalone
+docker compose -f milvus-standalone-docker-compose.yml logs -f etcd
+docker compose -f milvus-standalone-docker-compose.yml logs -f minio
+```
+
+6.Check status:
+
+```bash
+docker compose -f milvus-standalone-docker-compose.yml ps
+```
 
 ## Quick start development guide
 
@@ -170,6 +218,20 @@ After starting, update `.env`:
 ```ini
 MILVUS_URI=http://localhost:19530
 MILVUS_TOKEN=root:Milvus
+```
+
+by **docker compose**: https://milvus.io/docs/install_standalone-docker-compose.md
+
+```bash
+ curl -sfL https://github.com/milvus-io/milvus/releases/download/v2.6.11/milvus-standalone-docker-compose.yml -O docker-compose.yml
+
+ # Terminal 1 — start Milvus stack (etcd + minio + milvus)
+docker compose -f milvus-standalone-docker-compose.yml up -d
+
+# Terminal 2 — run app-ai with hot reload
+cd app-ai
+source venv/bin/activate
+uvicorn src.main:app --reload --port 8000
 ```
 
 **Option B — Milvus Lite (no Docker)**
