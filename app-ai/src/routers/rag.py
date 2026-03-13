@@ -205,31 +205,63 @@ async def ingest_document(
                     )
 
                     if needs_ocr:
-                        # Fall back to OCR: render the page to a PNG image, then run
-                        # tesseract to recognize the text.
+                        # Fall back to Claude Vision: render the page as a PNG image
+                        # and send it to Claude to extract the text.
                         #
-                        # PYTHON CONCEPT — lazy import inside try/except:
-                        #   We import pytesseract here (not at the top of the file) so
-                        #   the server still starts even if tesseract is not installed.
-                        #   If tesseract is missing, the except silently skips OCR for
-                        #   this page rather than crashing the whole ingestion job.
+                        # WHY Claude Vision instead of tesseract?
+                        #   tesseract struggles with Chinese text inside table cells —
+                        #   it garbles characters and misreads column alignment.
+                        #   Claude Vision understands Chinese + table structure natively,
+                        #   producing clean, accurate text even from complex layouts.
                         #
-                        # fitz.Matrix(2, 2) = 2× zoom → higher DPI image → better OCR accuracy.
-                        # pix.tobytes("png") = render page pixels as PNG bytes.
-                        # lang="chi_sim+eng" = Simplified Chinese + English language packs.
+                        # HOW IT WORKS:
+                        #   1. fitz.Matrix(2, 2) = 2× zoom → higher DPI → sharper image
+                        #   2. pix.tobytes("png") = render page pixels as PNG bytes
+                        #   3. base64.standard_b64encode() = encode PNG as base64 string
+                        #      (Anthropic API requires base64-encoded images, not raw bytes)
+                        #   4. HumanMessage with image + text content → Claude reads both
+                        #   5. llm.ainvoke() = async call (await pauses until Claude responds)
+                        #
+                        # PYTHON CONCEPT — base64 encoding:
+                        #   Binary data (PNG bytes) cannot be sent directly in JSON.
+                        #   base64 converts binary → ASCII string safe for JSON transport.
+                        #   base64.standard_b64encode(bytes) → bytes → .decode("utf-8") → str
                         try:
-                            import pytesseract
-                            from PIL import Image
+                            import base64
+                            from langchain_core.messages import HumanMessage as _HumanMessage
+                            from src.llm.claude_client import llm
 
                             mat = fitz.Matrix(2, 2)
                             pix = page.get_pixmap(matrix=mat)
-                            img = Image.open(io.BytesIO(pix.tobytes("png")))
-                            ocr_text = pytesseract.image_to_string(img, lang="chi_sim+eng")
-                            # Use OCR result if it's longer than what get_text() returned.
+                            png_bytes = pix.tobytes("png")
+                            image_b64 = base64.standard_b64encode(png_bytes).decode("utf-8")
+
+                            vision_msg = _HumanMessage(content=[
+                                {
+                                    "type": "image",
+                                    "source": {
+                                        "type": "base64",
+                                        "media_type": "image/png",
+                                        "data": image_b64,
+                                    },
+                                },
+                                {
+                                    "type": "text",
+                                    "text": (
+                                        "Extract all text from this image exactly as it appears. "
+                                        "For tables, use ' | ' to separate columns and preserve each row on its own line. "
+                                        "Include all Chinese and English text. "
+                                        "Return only the extracted text, no commentary."
+                                    ),
+                                },
+                            ])
+                            vision_response = await llm.ainvoke([vision_msg])
+                            ocr_text = vision_response.content
+                            # Use Claude's result if it's longer than what get_text() returned.
                             if len(ocr_text.strip()) > len(plain.strip()):
                                 plain = ocr_text
                         except Exception:
-                            pass  # tesseract not installed or OCR failed — keep plain as-is
+                            pass  # Claude Vision failed — keep plain as-is (may be empty)
 
                     if plain.strip():
                         page_parts.append(plain.strip())
@@ -448,8 +480,11 @@ async def list_chunks(
                 "index": i + 1,
                 # Human-friendly 1-based index so you can say "chunk 3 looks wrong".
 
-                "id": row["id"],
+                "id": str(row["id"]),
                 # Milvus auto-generated primary key — useful for debugging duplicates.
+                # str() is required: Milvus IDs are 64-bit integers (~4.6×10¹⁷) which
+                # exceed JavaScript's safe integer limit (2^53 ≈ 9×10¹⁵). Without str(),
+                # the client's JSON.parse() rounds all IDs to the same value.
 
                 "content": row["content"],
                 # The actual extracted text for this chunk — the main thing to verify.
