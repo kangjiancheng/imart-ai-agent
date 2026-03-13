@@ -18,14 +18,14 @@ This installs FastAPI, LangChain, Milvus (via docker), BGE-M3 (FlagEmbedding via
 **Prerequisite**
 
 1. set up the `.env` for claude api key、milvus service、tavily api key
-2. install and run milvus via docker compose: `curl -sfL https://github.com/milvus-io/milvus/releases/download/v2.6.11/milvus-standalone-docker-compose.yml -O docker-compose.yml`
 
 **Start**
 
 ```bash
-# start milvus
+# start milvus service
 docker compose -f milvus-standalone-docker-compose.yml up -d
 # docker compose -f milvus-standalone-docker-compose.yml ps
+# docker compose -f milvus-standalone-docker-compose.yml down
 
 # set python virtual environment
 python -m venv venv
@@ -41,7 +41,9 @@ pip install -r requirements.txt
 uvicorn src.main:app --reload --port 8000
 ```
 
-Then open: http://localhost:8000/docs
+1. Then open: http://localhost:8000/docs
+2. milvus zilliz attu gui: http://127.0.0.1:8888
+   2.1. or milvus web ui: http://127.0.0.1:9091/webui/
 
 > First start takes ~30–60 seconds while BGE-M3 loads into RAM. Subsequent starts are faster.
 
@@ -221,6 +223,8 @@ MILVUS_TOKEN=root:Milvus
 ```
 
 by **docker compose**: https://milvus.io/docs/install_standalone-docker-compose.md
+
+install and run milvus via docker compose
 
 ```bash
  curl -sfL https://github.com/milvus-io/milvus/releases/download/v2.6.11/milvus-standalone-docker-compose.yml -O docker-compose.yml
