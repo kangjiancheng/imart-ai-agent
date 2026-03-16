@@ -55,3 +55,4 @@ python-docx
 
 # Testing
 pytest
+pytest-asyncio

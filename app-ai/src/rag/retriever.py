@@ -33,6 +33,12 @@ from src.rag.embeddings import EmbeddingClient
 # EmbeddingClient = wraps OpenAI's embedding API (see embeddings.py)
 # Used here to convert the user's query text → a vector for Milvus search.
 
+from src.rag.reranker import rerank
+# rerank(query, docs) = re-orders a list of document strings by relevance.
+# Called AFTER Milvus search to improve the final ranking before Claude reads them.
+# Falls back silently to original Milvus order if no reranker is available.
+# See reranker.py for a full explanation of WHY reranking improves RAG quality.
+
 from src.rag.milvus_utils import ensure_collection
 # ensure_collection(client, name) creates the Milvus collection with the
 # standard schema if it doesn't exist yet. Shared across retriever, ingest,
@@ -175,6 +181,39 @@ class RAGRetriever:
 
                         score=score,
                     ))
+            # ── Step 4: Rerank for precision ──────────────────────────────────
+            # Milvus sorted docs by cosine similarity (approximate).
+            # Reranking re-scores them using a cross-encoder that reads
+            # query + document TOGETHER — more accurate than vector distance alone.
+            #
+            # rerank() returns the same content strings in a new order.
+            # We rebuild Document objects to preserve source/score metadata.
+            #
+            # WHY rerank AFTER the MIN_SCORE filter (not before)?
+            #   We already dropped low-quality results. Reranking a smaller,
+            #   pre-filtered list is faster and produces cleaner results.
+            if docs:
+                contents = [doc.content for doc in docs]
+                # Extract just the text strings — rerank() works on plain strings.
+                # In TypeScript: docs.map(d => d.content)
+
+                reranked_contents = await rerank(query, contents)
+                # await = pause here until the BGE reranker (or Cohere) finishes.
+                # reranked_contents = same strings, now in relevance order.
+
+                # Build a lookup dict so we can reassemble Document objects
+                # with original source/score after reordering.
+                # {content_string: Document} — lets us find metadata by content.
+                doc_map = {doc.content: doc for doc in docs}
+                # PYTHON CONCEPT — dict comprehension:
+                #   {key_expr: val_expr for item in iterable}
+                # In TypeScript: Object.fromEntries(docs.map(d => [d.content, d]))
+
+                docs = [doc_map[content] for content in reranked_contents if content in doc_map]
+                # Reassemble docs in the new reranked order.
+                # `if content in doc_map` guards against any edge case where
+                # the reranker returns a string not in our original set.
+
             return docs
 
         except Exception:
