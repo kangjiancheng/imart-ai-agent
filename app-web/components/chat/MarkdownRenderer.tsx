@@ -47,7 +47,7 @@ export default function MarkdownRenderer({ content }: Props) {
         [&_a]:!text-blue-500 [&_a]:!underline hover:[&_a]:!text-blue-600
         [&_blockquote]:!border-l-4 [&_blockquote]:!border-zinc-300 [&_blockquote]:!pl-4 [&_blockquote]:!italic [&_blockquote]:!text-zinc-600 [&_blockquote]:!my-2
         dark:[&_blockquote]:!border-zinc-600 dark:[&_blockquote]:!text-zinc-400
-        [&_table]:!border-collapse [&_table]:!border [&_table]:!border-zinc-300 [&_table]:!my-2 [&_table]:!text-sm
+        [&_table]:!border-collapse [&_table]:!border [&_table]:!border-zinc-300 [&_table]:!my-2 [&_table]:!text-sm [&_table]:!w-full
         dark:[&_table]:!border-zinc-600
         [&_thead]:!bg-zinc-200 dark:[&_thead]:!bg-zinc-800
         [&_th]:!border [&_th]:!border-zinc-300 [&_th]:!px-3 [&_th]:!py-2 [&_th]:!font-bold [&_th]:!text-left

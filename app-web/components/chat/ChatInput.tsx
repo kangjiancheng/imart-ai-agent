@@ -59,7 +59,7 @@ export default function ChatInput({ onSend, isStreaming, onStop }: Props) {
 
   return (
     <div className="border-t border-zinc-200 dark:border-zinc-700 bg-white dark:bg-zinc-950 px-4 py-3">
-      <div className="mx-auto max-w-2xl">
+      <div className="mx-auto max-w-3xl">
 
         {/* File preview chip — shown above the input box when a file is attached */}
         {attachment && (
