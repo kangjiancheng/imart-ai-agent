@@ -697,3 +697,257 @@ Per-user facts stored in Milvus `user_memory`, always filtered by `user_id`.
 | `openai`                | transitive            | Present in requirements but embeddings use BGE-M3 |
 
 > **Note on `transformers` version:** `FlagEmbedding==1.3.5` requires `transformers==4.44.2`. Do **not** upgrade `transformers` to v5.x — it removes `is_torch_fx_available` which crashes BGE-M3 at startup. This also means `unstructured` (which forces `transformers>=5.x`) cannot coexist with this project.
+
+---
+
+## Developer Tips
+
+### SSE Response Format
+
+The agent streams responses as Server-Sent Events (SSE) with JSON payloads. Each event is a JSON object on a `data:` line, terminated by `\n\n`:
+
+```
+data: {"type":"token","content":"Hello"}
+
+data: {"type":"token","content":" world"}
+
+data: {"type":"done"}
+```
+
+**Event types:**
+- `{"type":"token","content":"..."}` — a chunk of the response (streamed token-by-token)
+- `{"type":"done"}` — stream finished successfully
+- `{"type":"error","message":"..."}` — an error occurred
+
+**Important:** The `content` field contains JSON-encoded text, so newlines are escaped as `\n`. The frontend is responsible for unescaping these to actual newlines before rendering.
+
+#### Complete Demo: Generating SSE Events
+
+Here's how the backend generates SSE events (in `routers/agent.py`):
+
+**1. Agent loop yields tokens:**
+```python
+async for token in run(request):
+    # token = "Here's"
+    # token = " a"
+    # token = " markdown"
+    # token = " tutorial:\n\n```markdown\n# Building..."
+    # etc.
+
+    if token:
+        # Step 1: Create typed event dict
+        event_dict = {
+            'type': 'token',
+            'content': token  # May contain newlines, quotes, etc.
+        }
+
+        # Step 2: JSON-encode the event
+        # json.dumps() escapes special characters:
+        # - newlines become \n
+        # - quotes become \"
+        # - backslashes become \\
+        json_str = json.dumps(event_dict, ensure_ascii=False)
+        # Result: '{"type":"token","content":"Here\'s a markdown tutorial:\\n\\n```markdown"}'
+
+        # Step 3: Format as SSE event
+        sse_event = f"data: {json_str}\n\n"
+        # Result: 'data: {"type":"token","content":"Here\'s a markdown tutorial:\\n\\n```markdown"}\n\n'
+
+        # Step 4: Yield to client
+        yield sse_event
+```
+
+**2. Wire format (what client receives):**
+```
+data: {"type":"token","content":"Here's a markdown"}
+
+data: {"type":"token","content":" tutorial:\n\n```markdown"}
+
+data: {"type":"token","content":"\n# Building an AI Agent"}
+
+data: {"type":"done"}
+
+```
+
+Notice:
+- Each event is on a single line starting with `data: `
+- Events are separated by blank lines (`\n\n`)
+- Newlines in content are escaped as `\n` (literal backslash-n in the JSON)
+- This is correct JSON encoding — the frontend will unescape it
+
+**3. Example with markdown content:**
+```python
+# Backend generates this token:
+token = """## Core Components
+
+1. **LLM Brain** - The reasoning engine
+2. **Tools** - Actions the agent can perform
+3. **Memory** - Context and history"""
+
+# json.dumps() escapes it:
+json_str = json.dumps({'type': 'token', 'content': token}, ensure_ascii=False)
+# Result: '{"type":"token","content":"## Core Components\\n\\n1. **LLM Brain** - The reasoning engine\\n2. **Tools** - Actions the agent can perform\\n3. **Memory** - Context and history"}'
+
+# SSE event sent to client:
+sse_event = f"data: {json_str}\n\n"
+# Result:
+# data: {"type":"token","content":"## Core Components\n\n1. **LLM Brain** - The reasoning engine\n2. **Tools** - Actions the agent can perform\n3. **Memory** - Context and history"}
+#
+```
+
+**4. Frontend receives and processes:**
+```typescript
+// Raw SSE line from network
+const line = 'data: {"type":"token","content":"## Core Components\\n\\n1. **LLM Brain**..."}';
+
+// Parse JSON (automatically unescapes \n to actual newlines)
+const event = JSON.parse(line.replace(/^data: /, ''));
+// event.content now has actual newlines:
+// "## Core Components\n\n1. **LLM Brain**..."
+
+// Pass to markdown renderer
+md.render(event.content);
+// markdown-it sees actual newlines and parses:
+// - "## Core Components" → <h2>Core Components</h2>
+// - "1. **LLM Brain**..." → <ol><li><strong>LLM Brain</strong>...</li></ol>
+```
+
+#### Why JSON Escaping Matters
+
+**Without proper escaping (WRONG):**
+```python
+# ❌ WRONG: Don't do this
+sse_event = f"data: {{'type': 'token', 'content': '{token}'}}\n\n"
+# If token contains a newline, the SSE format breaks:
+# data: {"type": "token", "content": "line1
+# line2"}
+#
+# ^ This is invalid SSE! The event spans multiple lines.
+```
+
+**With proper JSON escaping (CORRECT):**
+```python
+# ✅ CORRECT: Use json.dumps()
+sse_event = f"data: {json.dumps({'type': 'token', 'content': token})}\n\n"
+# Result: data: {"type":"token","content":"line1\nline2"}\n\n
+# ^ Valid SSE! The event is on one line, newlines are escaped.
+```
+
+#### Common Backend Issues
+
+**Issue: Newlines appear as literal `\n` in frontend**
+- Cause: Frontend not unescaping JSON escape sequences
+- Solution: Frontend must call `.replace(/\\n/g, '\n')` after JSON.parse()
+- Note: This is a frontend issue, not backend
+
+**Issue: Special characters (Chinese, emoji) appear as `\uXXXX`**
+- Cause: Using `ensure_ascii=True` in json.dumps()
+- Solution: Use `ensure_ascii=False` (already done in the code)
+- Verify: Check that `json.dumps(..., ensure_ascii=False)` is used
+
+**Issue: Quotes in content break the JSON**
+- Cause: Not using json.dumps() (manual string formatting)
+- Solution: Always use `json.dumps()` to handle escaping
+- Example: `json.dumps({'content': 'He said "hello"'})` → `{"content":"He said \\"hello\\""}`
+
+**Issue: SSE stream cuts off mid-event**
+- Cause: Nginx or proxy buffering the response
+- Solution: Set headers in StreamingResponse:
+  ```python
+  headers={
+      "Cache-Control": "no-cache",
+      "X-Accel-Buffering": "no",  # Nginx-specific
+  }
+  ```
+
+### File Upload Handling
+
+The `/v1/agent/chat-with-file` endpoint accepts multipart/form-data:
+
+| Field | Type | Required | Notes |
+|-------|------|----------|-------|
+| `file` | binary | Yes | PDF, DOCX, TXT, CSV, JSON, YAML, HTML, XML |
+| `message` | string | Yes | User's question about the file |
+| `user_id` | string | Yes | User identifier for memory recall |
+| `session_id` | string | Yes | Session ID for logging/tracing |
+| `subscription_tier` | string | Yes | e.g. "free", "pro", "enterprise" |
+| `locale` | string | No | Default: "en-US" |
+| `timezone` | string | No | Default: "UTC" |
+| `stream` | string | No | "true" or "false" (default: "true") |
+| `history_json` | string | No | JSON-encoded message history array |
+
+**Processing:**
+1. File is read as binary
+2. Text extracted via `file_parser.py` (PyMuPDF for PDF, python-docx for DOCX, UTF-8 for others)
+3. Extracted text capped at 80,000 characters (~20,000 tokens)
+4. Text injected into Claude's [REDACTED] as `## Uploaded Document`
+5. Response streamed back as SSE (same format as regular chat)
+
+### Debugging Agent Loop
+
+Enable logging to see agent reasoning:
+
+```python
+import logging
+logging.basicConfig(level=logging.DEBUG)
+```
+
+This shows:
+- Tool calls and their results
+- Claude's reasoning steps
+- Token counts and context window usage
+- Memory retrieval operations
+
+### Testing Endpoints
+
+Use the Swagger UI at `http://localhost:8000/docs`:
+
+1. **POST /v1/agent/chat** — test regular chat
+   - Body: `{"user_id":"test","message":"Hello","user_context":{"subscription_tier":"free"},"session_id":"123","stream":true}`
+
+2. **POST /v1/agent/chat-with-file** — test file upload
+   - Use the "Try it out" button to upload a file
+   - Fill in: message, user_id, session_id, subscription_tier
+
+3. **GET /health** — check service status
+
+4. **GET /info** — view service configuration
+
+### Common Issues
+
+**Issue: "No response body" or stream cuts off**
+- Check Nginx buffering: ensure `X-Accel-Buffering: no` header is set
+- Verify `Cache-Control: no-cache` header is present
+- Check client timeout settings (SSE streams can be long)
+
+**Issue: Newlines not rendering in frontend**
+- Backend sends escaped newlines (`\n` as literal characters in JSON)
+- Frontend must unescape: `content.replace(/\\n/g, '\n')`
+- Verify unescaping happens BEFORE markdown parsing
+
+**Issue: File upload fails with "Unsupported file type"**
+- Check file extension is in supported list: PDF, DOCX, TXT, CSV, JSON, YAML, HTML, XML
+- Verify file is not corrupted (try opening it locally first)
+- Check file size is reasonable (very large files may timeout)
+
+**Issue: BGE-M3 model takes 30-60s to load on first start**
+- This is normal — the model weights (~2.3 GB) are downloaded and loaded into RAM
+- Subsequent starts are faster (model stays in memory)
+- Ensure you have ~4 GB free disk and ~1 GB free RAM
+
+### Performance Tuning
+
+**Token streaming latency:**
+- Tokens are yielded as soon as Claude produces them
+- Network latency dominates (not server processing)
+- Use `stream=true` for real-time UX, `stream=false` for batch processing
+
+**Memory usage:**
+- BGE-M3 runs with fp16 (half precision) to fit in ~1 GB RAM
+- Milvus vector database uses disk storage (not RAM)
+- Conversation history is kept in memory during a session
+
+**Context window management:**
+- Claude 3.5 Sonnet has 200K token context window
+- Agent loop automatically manages history to stay within limits
+- Older messages are dropped if context exceeds threshold

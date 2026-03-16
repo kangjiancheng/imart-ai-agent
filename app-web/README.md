@@ -230,6 +230,204 @@ Error event: `{"type":"error","message":"..."}` — displayed inline in the assi
 | highlight.js | latest  | Code syntax colors           |
 
 **Key markdown features:**
-- `react-markdown` — robust parser with full CommonMark + GFM support
-- `remark-gfm` — tables, strikethrough, task lists
-- `rehype-highlight` + `highlight.js` — syntax highlighting for 190+ languages with Atom One Dark theme
+- `markdown-it` — robust parser with full CommonMark + GFM support
+- Syntax highlighting for 190+ languages with Atom One Dark theme
+- Proper handling of escaped newlines from backend SSE stream
+
+---
+
+## Developer Tips
+
+### Debugging SSE Stream Data
+
+The frontend includes built-in debugging for SSE events. Open the browser DevTools Console (F12) and look for:
+
+- `[SSE Event]` — each raw SSE event received from the backend
+- `[Token Unescaped]` — shows before/after unescaping of escape sequences
+- `[Stream Complete]` — full accumulated buffer when streaming finishes
+- `[SSE Parse Error]` — any JSON parsing errors
+
+**Why this matters:** The backend sends markdown content with escaped newlines (`\n` as literal characters in JSON). The frontend unescapes these to actual newlines so `markdown-it` can properly parse headings, code blocks, and lists.
+
+#### Complete Demo: Stream Data Handling
+
+Here's the full flow with actual data:
+
+**1. Backend sends SSE events (raw wire format):**
+```
+data: {"type":"token","content":"Here's a markdown"}
+
+data: {"type":"token","content":" tutorial:\n\n```markdown"}
+
+data: {"type":"token","content":"\n# Building an AI Agent"}
+
+data: {"type":"done"}
+```
+
+Notice: newlines are escaped as `\n` in the JSON string (this is correct JSON encoding).
+
+**2. Frontend receives and parses (in `useStream.ts`):**
+```typescript
+// Raw line from SSE stream
+const line = 'data: {"type":"token","content":"Here\'s a markdown tutorial:\\n\\n```markdown"}';
+
+// Step 1: Remove "data: " prefix and trim
+const cleanLine = line.replace(/^data: /, '').trim();
+// Result: {"type":"token","content":"Here's a markdown tutorial:\n\n```markdown"}
+
+// Step 2: Parse JSON
+const event = JSON.parse(cleanLine);
+// Result: { type: "token", content: "Here's a markdown tutorial:\n\n```markdown" }
+// Note: JSON.parse() automatically converts \n to actual newlines!
+
+// Step 3: Unescape any remaining escape sequences
+let content = event.content;
+content = content
+  .replace(/\\n/g, '\n')      // \n → newline
+  .replace(/\\r/g, '\r')      // \r → carriage return
+  .replace(/\\t/g, '\t')      // \t → tab
+  .replace(/\\\\/g, '\\');    // \\ → single backslash
+
+// Result: "Here's a markdown tutorial:\n\n```markdown"
+// (with actual newlines, not escaped)
+
+// Step 4: Pass to callback
+callbacks.onToken(content);
+```
+
+**3. Frontend accumulates tokens in state:**
+```typescript
+// In ChatLayout.tsx
+streamBufferRef.current += token;
+// After all tokens: "Here's a markdown tutorial:\n\n```markdown\n# Building an AI Agent..."
+```
+
+**4. Frontend renders with markdown-it:**
+```typescript
+// In MarkdownRenderer.tsx
+const html = md.render(streamBufferRef.current);
+// markdown-it sees actual newlines and parses:
+// - "# Building an AI Agent" → <h1>Building an AI Agent</h1>
+// - "```markdown" → <pre><code>...</code></pre>
+// - etc.
+```
+
+**5. Browser console output (for debugging):**
+```
+[SSE Event] {"type":"token","content":"Here's a markdown"}
+[Token Unescaped] {
+  raw: "Here's a markdown",
+  unescaped: "Here's a markdown"
+}
+[SSE Event] {"type":"token","content":" tutorial:\n\n```markdown"}
+[Token Unescaped] {
+  raw: " tutorial:\n\n```markdown",
+  unescaped: " tutorial:\n\n```markdown"
+}
+[SSE Event] {"type":"token","content":"\n# Building an AI Agent"}
+[Token Unescaped] {
+  raw: "\n# Building an AI Agent",
+  unescaped: "\n# Building an AI Agent"
+}
+[SSE Event] {"type":"done"}
+[Stream Complete] Full buffer: Here's a markdown tutorial:
+
+```markdown
+# Building an AI Agent...
+```
+
+#### Common Pitfalls
+
+**Pitfall 1: Not unescaping before markdown parsing**
+```typescript
+// ❌ WRONG: Pass escaped content directly to markdown-it
+md.render(event.content);  // markdown-it sees literal "\n" characters
+
+// ✅ CORRECT: Unescape first
+const unescaped = event.content.replace(/\\n/g, '\n');
+md.render(unescaped);  // markdown-it sees actual newlines
+```
+
+**Pitfall 2: Forgetting JSON.parse() already unescapes**
+```typescript
+// ❌ WRONG: Double-unescaping
+const line = '{"content":"line1\\nline2"}';
+const event = JSON.parse(line);  // event.content = "line1\nline2" (actual newline)
+const unescaped = event.content.replace(/\\n/g, '\n');  // No change needed!
+
+// ✅ CORRECT: JSON.parse() handles it
+const line = '{"content":"line1\\nline2"}';
+const event = JSON.parse(line);  // event.content = "line1\nline2" (actual newline)
+// Use event.content directly
+```
+
+**Pitfall 3: Splitting on newlines before unescaping**
+```typescript
+// ❌ WRONG: Split before unescaping
+const lines = event.content.split('\n');  // Splits on literal "\n" strings, not newlines
+
+// ✅ CORRECT: Unescape first, then split
+const unescaped = event.content.replace(/\\n/g, '\n');
+const lines = unescaped.split('\n');  // Splits on actual newlines
+```
+
+**Pitfall 4: Not handling all escape sequences**
+```typescript
+// ❌ WRONG: Only handle \n
+content = content.replace(/\\n/g, '\n');
+
+// ✅ CORRECT: Handle all common escapes
+content = content
+  .replace(/\\n/g, '\n')      // newline
+  .replace(/\\r/g, '\r')      // carriage return
+  .replace(/\\t/g, '\t')      // tab
+  .replace(/\\\\/g, '\\')     // backslash
+  .replace(/\\"/g, '"')       // quote
+  .replace(/\\'/g, "'");      // apostrophe
+```
+
+### Markdown Rendering Pipeline
+
+1. Backend sends SSE events with JSON-encoded content (newlines escaped)
+2. Frontend receives and parses JSON
+3. Frontend unescapes: `\n` → actual newline, `\t` → tab, etc.
+4. `markdown-it` parses the unescaped markdown
+5. Tailwind arbitrary selectors apply styling to HTML elements
+
+If markdown doesn't render correctly:
+1. Check browser console for `[Token Unescaped]` logs
+2. Verify the unescaped content has actual newlines (not `\n` strings)
+3. Ensure `markdown-it` is receiving valid markdown syntax
+
+### File Upload Flow
+
+1. User selects file via paperclip button
+2. File preview chip appears above input
+3. User types question + presses Enter
+4. Frontend sends multipart POST to `/v1/agent/chat-with-file`
+5. Backend extracts text from file (PDF/DOCX/TXT)
+6. Backend injects extracted text into Claude's context
+7. Response streams back as SSE (same format as regular chat)
+
+**Supported formats:** PDF (with OCR fallback), DOCX, TXT, CSV, JSON, YAML, HTML, XML
+
+### localStorage Schema
+
+Chat data is stored as JSON in `localStorage` under key `"imart_chats"`:
+
+```json
+[
+  {
+    "id": "1718000000000-abc1234",
+    "title": "First 40 chars of opening message",
+    "messages": [
+      { "role": "user", "content": "..." },
+      { "role": "assistant", "content": "..." }
+    ],
+    "createdAt": 1718000000000,
+    "updatedAt": 1718000000000
+  }
+]
+```
+
+To inspect: Open DevTools → Application → Local Storage → find `imart_chats`
