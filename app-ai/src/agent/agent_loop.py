@@ -22,7 +22,7 @@
 # ─────────────────────────────────────────────────────────────────────────────
 
 import anthropic
-from langchain_core.messages import HumanMessage, ToolMessage
+from langchain_core.messages import HumanMessage, SystemMessage, ToolMessage
 # HumanMessage  = a typed object representing one user message turn
 #                 Claude needs typed objects, not plain {"role": "user", ...} dicts
 # ToolMessage   = a typed object that carries a tool's result BACK to Claude
@@ -81,6 +81,53 @@ def _summarize_iterations(iterations: list[dict]) -> str:
         f"Last tool result snippet: {str(iterations[-1].get('result', ''))[:200]}"
         # [:200] = take only the first 200 characters — keep the summary short
     )
+
+
+async def _extract_memory(user_message: str) -> str:
+    """
+    Ask Claude to extract any durable personal facts from a single user message.
+    Returns a short fact string, or "" if nothing is worth remembering.
+
+    EXAMPLES:
+      "I'm a web developer learning AI agents with Python"
+        → "User is a web developer learning AI agents with Python"
+      "What's the weather today?"
+        → ""
+      "Thanks, that was helpful!"
+        → ""
+
+    WHY A SEPARATE LLM CALL?
+      The main agent loop streams a response to the user, so we can't inspect
+      Claude's reasoning mid-stream. This is a cheap, focused call (no tools,
+      no history, tiny prompt) that runs AFTER streaming finishes.
+      The user never waits for it — it happens in the background post-response.
+
+    PYTHON CONCEPT — async def returning str:
+      This is a coroutine that makes ONE LLM call and returns the result.
+      The caller must `await` it: `extracted = await _extract_memory(msg)`
+    """
+    # Use the bare llm (no tools bound) — we just want a plain text answer.
+    # SystemMessage and HumanMessage are already imported at the top of this file.
+    extraction_prompt = (
+        "You extract durable personal facts from user messages for long-term memory.\n"
+        "Rules:\n"
+        "- If the message contains a personal fact (profession, preference, goal, skill, "
+        "background), rewrite it as a single concise sentence starting with 'User'.\n"
+        "- If the message is a question, greeting, or contains NO personal fact, "
+        "reply with exactly: NONE\n"
+        "- Reply with ONLY the fact sentence or NONE. No explanation."
+    )
+
+    response = await llm.ainvoke([
+        SystemMessage(content=extraction_prompt),
+        HumanMessage(content=user_message),
+    ])
+
+    # response.content is the plain text reply from Claude
+    result = response.content.strip()
+
+    # Return empty string for "NONE" so callers can use a simple `if extracted:` check
+    return "" if result.upper() == "NONE" else result
 
 
 async def run(request: AgentRequest):
@@ -303,6 +350,30 @@ async def run(request: AgentRequest):
     # ── Step 5: write to long-term memory ────────────────────────────────────
     # This runs AFTER the streaming is done. We never write memory DURING the loop
     # because Milvus writes add latency — the user would see a pause in the token stream.
+    #
+    # MEMORY EXTRACTION — ask Claude what is worth remembering.
+    # WHY NOT store every user message?
+    #   Most messages are transient ("Thanks", "What's the weather?") and have no
+    #   personalization value. Storing them bloats user_memory with noise, and when
+    #   recall() returns those noisy chunks, they waste precious system-prompt tokens.
+    #
+    # WHY NOT only store tool-call summaries (the old `if iterations:` approach)?
+    #   Plain statements like "I'm a web developer" never trigger tools, so they were
+    #   silently dropped even though they ARE valuable personal facts.
+    #
+    # THE RIGHT APPROACH — memory extraction / "reflection":
+    #   Ask Claude to read the user's message and extract any durable personal facts.
+    #   Claude returns an empty string if the message contains nothing worth remembering.
+    #   This way we store ONLY signal, never noise.
+    extracted = await _extract_memory(request.message)
+    # extracted = a short fact string, e.g. "User is a web developer learning AI agents"
+    # OR an empty string "" if nothing was worth remembering.
+
+    if extracted:
+        await memory.store_if_new(request.user_id, extracted, tags=["user_fact"])
+        # tags=["user_fact"] marks this as a Claude-extracted personal fact,
+        # distinct from ["session"] tool-use summaries.
+
     if iterations:
         summary = _summarize_iterations(iterations)
         # e.g. "Agent used 1 tool call(s): calculator. Last tool result snippet: 51.0"

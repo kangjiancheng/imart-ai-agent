@@ -981,3 +981,227 @@ If you moved long-term memory into NestJS, you'd have to move the embedding mode
 If you moved short-term history into Python, you'd need Python to have a database per user and session management, and the history would be unavailable to the UI — NestJS would still need its own copy anyway.
 
 Each service stores exactly what it needs to do its job, and nothing more.
+
+---
+
+## 16. user_memory vs knowledge_memory vs history — Full Comparison
+
+This section answers three questions that come up when working with the memory system:
+
+1. Why store `user_memory` at all?
+2. What is the difference between `user_memory` and `history` managed by NestJS?
+3. What is the difference between `user_memory` and `knowledge_memory` (RAG)?
+
+---
+
+### Why store user_memory?
+
+Without `user_memory`, Claude starts every session from a blank slate — even if this user has had 50 conversations before.
+
+```text
+WITHOUT user_memory:
+
+  Session 1:  "I'm a web developer learning AI agents"
+              Claude: "Great! Here's an intro to AI agents..."
+                                                             ↓ nothing saved
+  Session 2 (next week):  "How do I add memory to an agent?"
+              Claude: "Sure! Here's a beginner overview..."
+                       ← no idea this user already knows the basics
+```
+
+```text
+WITH user_memory:
+
+  Session 1:  "I'm a web developer learning AI agents"
+              Claude: answers...
+              → VectorMemory.store_if_new() saves:
+                "User is a web developer learning AI agents with Python"
+                                                             ↓ saved to Milvus
+
+  Session 2 (next week):  "How do I add memory to an agent?"
+              → VectorMemory.recall() finds the saved fact
+              → system prompt now includes:
+                "## What you know about this user
+                 - User is a web developer learning AI agents with Python"
+              Claude: "Since you're already building in Python, here's how
+                       to add Milvus-backed long-term memory to your ReAct loop..."
+                       ← personalized from the start, no re-introduction needed
+```
+
+`user_memory` is what turns a stateless API call into a persistent, personalized agent.
+
+---
+
+### user_memory vs history (NestJS)
+
+Both are about remembering what was said. The difference is *what kind of information* and *how long it needs to live*.
+
+| | NestJS history | user_memory (Milvus) |
+|---|---|---|
+| **What it stores** | Every message, in exact order | Only durable personal facts |
+| **Purpose** | Replay the conversation thread so Claude can follow "it" / "that" / "as I said" | Personalize future sessions with known user context |
+
+| **Lifespan** | One session (or until the user deletes the thread) | Permanent across all sessions |
+| **Queried by** | Exact ID and order — `SELECT WHERE session_id = X ORDER BY created_at` | Semantic similarity — `search WHERE vector ≈ query AND user_id = X` |
+| **Storage** | SQL rows in NestJS database | Vector embeddings in Milvus |
+| **Who writes it** | NestJS, after every turn | Python agent, after each session |
+| **Who reads it** | NestJS sends it as `request.history`; Python converts it to typed messages | Python calls `recall()` before the loop starts |
+| **Where it lands in the prompt** | Main message list — `HumanMessage`, `AIMessage` turns | System prompt `## What you know about this user` section |
+| **Example content** | `"What is 15% of $340?"` → `"It is $51."` → `"Now add 8% tax."` | `"User is a web developer learning AI agents"` |
+
+#### The key difference in plain terms
+
+```text
+history:     "What did we say IN THIS conversation?"
+             → Needed to follow a multi-turn dialogue ("it", "that", "as I said before")
+             → Lives in NestJS SQL, gone when the session is over
+             → Exact sequence matters — oldest first, current message last
+
+user_memory: "What do we know about THIS USER from previous sessions?"
+             → Needed for personalisation across weeks or months
+             → Lives in Milvus, persists permanently
+             → Sequence doesn't matter — retrieved by semantic meaning
+```
+
+#### Why the same message is not stored in both
+
+Your message `"I'm a web developer learning AI agents"` is already saved to NestJS history for the current session. The question for `user_memory` is different: is this fact worth injecting into the system prompt in a *future* session?
+
+NestJS history answers: *what was said*.
+`user_memory` answers: *what should Claude know about this person*.
+
+These are different questions that require different storage strategies.
+
+---
+
+### user_memory vs knowledge_memory (RAG)
+
+Both use the exact same technical stack (BGE-M3 embeddings + Milvus cosine search). The difference is *whose data it is* and *when it's written*.
+
+| | user_memory | knowledge_memory (RAG) |
+|---|---|---|
+| **Content** | Facts about one specific user | Company documents, manuals, policies |
+| **Scope** | Private — filtered by `user_id` on every search | Shared — all users search the same collection |
+| **Written by** | Python agent automatically, after each session | Admin pipeline — `POST /v1/rag/ingest` |
+| **Written when** | After the ReAct loop finishes streaming | When an admin uploads a document |
+| **Milvus collection** | `user_memory` | `knowledge_base` |
+| **Similarity threshold** | 0.78 — must be confident | 0.72 — broader retrieval acceptable |
+| **Injected as** | System prompt `## What you know about this user` | `ToolMessage` mid-loop (when Claude calls `rag_retrieve`) |
+| **Injected when** | Before the loop starts | Mid-loop, only when Claude decides to use it |
+| **GDPR** | Per-user deletion required | Document-level deletion |
+| **Example** | `"User prefers Python and works in finance"` | `"[Document 1 — source: refund-policy.pdf] ...content..."` |
+
+#### Why the thresholds are different (0.78 vs 0.72)
+
+A wrong memory fact injected into the *system prompt* shapes how Claude interprets the entire conversation before any reasoning starts. A wrong RAG chunk arrives as a *tool result* that Claude can read, reason about, and discard.
+
+```text
+Wrong memory in system prompt:
+  "User is a beginner at Python"
+  → Claude oversimplifies every answer for the whole session
+  → User gets condescending responses they can't override
+
+Wrong RAG chunk in ToolMessage:
+  "The refund policy states 14 days..."  (actually 30 days)
+  → Claude reads it but can cross-reference with other chunks
+  → User can ask a follow-up and Claude corrects itself
+```
+
+A higher recall threshold (0.78) for `user_memory` means fewer memories come through, but each one is more likely to be correct. It's better to retrieve nothing than the wrong personal fact.
+
+#### In plain terms
+
+```text
+knowledge_memory:  "What does the company's documentation say?"
+                   → shared by all users, written by admins
+                   → retrieved mid-conversation when Claude needs facts
+
+user_memory:       "What do we know about this specific person?"
+                   → private per user, written automatically by the agent
+                   → injected at session start to personalize the whole interaction
+```
+
+---
+
+### What gets stored in user_memory — and what doesn't
+
+Not every user message is worth remembering. The agent uses a dedicated LLM call (`_extract_memory()` in `agent_loop.py`) to extract only durable personal facts.
+
+```text
+WORTH storing:
+  "I'm a web developer learning AI agents with Python"
+    → stored as: "User is a web developer learning AI agents with Python"
+
+  "I prefer concise bullet-point answers"
+    → stored as: "User prefers concise bullet-point answers"
+
+  "I work in finance and need compliance-aware responses"
+    → stored as: "User works in finance and needs compliance-aware responses"
+
+NOT worth storing (Claude returns NONE):
+  "What's the weather today?"   → question, no personal fact
+  "Thanks, that was helpful!"   → acknowledgement, no personal fact
+  "Can you repeat that?"        → clarification request, no personal fact
+```
+
+The `_extract_memory()` function in `agent_loop.py` sends the user's message to Claude with a focused single-turn prompt. Claude either rewrites it as a fact starting with "User" or returns "NONE". This prevents noise from accumulating in `user_memory` and keeps recalled chunks relevant.
+
+#### Why not store every message?
+
+```text
+If every message were stored:
+
+  user_memory after 10 messages:
+  - "What's the weather today?"
+  - "Thanks"
+  - "Can you repeat that?"
+  - "How do I add memory to an agent?"
+  - "OK"
+  - ...
+
+  recall() returns up to 5 of these for the next session.
+  The system prompt now contains "User said OK" and "User asked about weather".
+  Those tokens wasted = fewer tokens for actual personal context.
+```
+
+```text
+With _extract_memory():
+
+  user_memory after 10 messages:
+  - "User is a web developer learning AI agents with Python"
+  - "User prefers concise bullet-point answers"
+
+  recall() returns both of these.
+  The system prompt section is small, accurate, and genuinely useful.
+```
+
+---
+
+### All three layers in one prompt
+
+Every request assembles all three layers into one Claude prompt:
+
+```text
+SystemMessage         ← agent identity + rules
+  └─ memory section   ← user_memory recalled facts  (Layer 3 — long-term)
+HumanMessage          ← past turn  ┐
+AIMessage             ← past turn  │ NestJS history  (Layer 1 — short-term)
+HumanMessage          ← past turn  ┘
+AIMessage(tool_call)  ← this loop ─┐
+ToolMessage(result)   ← this loop  │ knowledge_memory RAG result  (Layer 2)
+HumanMessage          ← current user message
+```
+
+Each layer answers a different question:
+
+| Layer | Question answered |
+|---|---|
+| `user_memory` | Who is this person and what do they care about? |
+| `history` | What have we been talking about in this conversation? |
+| `knowledge_memory` | What do our company documents say about this topic? |
+
+All three are needed for a production-quality agent. Remove any one and the agent becomes noticeably worse:
+
+- No `user_memory` → cold, impersonal responses on every new session
+- No `history` → can't follow multi-turn dialogue ("what does *it* mean?")
+- No `knowledge_memory` → can't answer questions about private documents
