@@ -68,10 +68,10 @@ class VectorMemory:
     COLLECTION = settings.milvus_collection_memory  # "user_memory"
 
     # MIN_SCORE: minimum similarity threshold for memory recall.
-    # Higher than RAG's 0.72 — memory recall must be more confident.
-    # WHY HIGHER? A wrong memory ("User is a beginner") injected into the prompt
-    # could significantly mislead Claude. Better to retrieve nothing than the wrong thing.
-    MIN_SCORE = 0.78
+    # Set to 0.40 — personal memory queries are often indirect ("Who am I?", "What do I do?")
+    # and score lower than exact-match queries, so a strict threshold causes misses.
+    # WHY NOT lower than 0.40? Below this, unrelated memories start appearing as noise.
+    MIN_SCORE = 0.40
 
     def __init__(self):
         # Create one EmbeddingClient per VectorMemory instance.
@@ -155,8 +155,11 @@ class VectorMemory:
                 # PYTHON CONCEPT — dict.get() with default:
                 #   hit.get("distance", 0) reads the "distance" key.
                 #   If missing (Milvus version difference), defaults to 0.
-                if hit.get("distance", 0) >= self.MIN_SCORE:
-                    chunks.append(hit["entity"]["content"])
+                score = hit.get("distance", 0)
+                content = hit["entity"]["content"]
+                print(f"[recall] score={score:.4f} MIN={self.MIN_SCORE} content='{content[:60]}'")
+                if score >= self.MIN_SCORE:
+                    chunks.append(content)
                     # Append just the content string — the system prompt
                     # doesn't need the score or metadata, just the text.
             return chunks

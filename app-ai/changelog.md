@@ -1,3 +1,94 @@
+# Fix: user_memory — extraction bug, garbage data, recall threshold
+
+**Files:** `src/agent/agent_loop.py`, `src/memory/vector_memory.py`
+
+## Problems
+
+### 1. Memory never stored for plain conversational messages
+Step 5 of the agent loop was gated on `if iterations:` — only triggered when Claude called a tool. A plain self-introduction (`"I'm a web developer"`) produced no tool calls, so `iterations = []` and memory was silently skipped.
+
+### 2. Wrong content stored (garbage data)
+The initial fix unconditionally stored `request.message` verbatim. This caused raw user sentences, full Claude replies, and even `"NONE\n\nGot it..."` strings to be written to `user_memory`.
+
+### 3. Extraction returned conversational reply instead of a fact
+`_extract_memory()` reused the module-level `llm` singleton (`streaming=True`, default temperature). With streaming enabled, `ainvoke()` caused Claude to reply conversationally (`"I understand. You're a web developer..."`) instead of following the extraction rules.
+
+### 4. `response.content` list not handled
+`ChatAnthropic.ainvoke()` can return `response.content` as a list of content blocks instead of a plain string. The original code called `.strip()` directly on the list, producing a stringified list that never matched `"NONE"`.
+
+### 5. Recall threshold too strict
+`MIN_SCORE = 0.78` was too high. Indirect queries like `"Who am I"` scored ~0.47 against stored facts — valid memories were always filtered out.
+
+## Fixes
+
+### `agent_loop.py`
+
+**Memory extraction redesigned** — replaced `if iterations:` gate with a dedicated extraction call:
+
+```python
+extracted = await _extract_memory(request.message)
+if extracted:
+    await memory.store_if_new(request.user_id, extracted, tags=["user_fact"])
+
+if iterations:
+    summary = _summarize_iterations(iterations)
+    await memory.store_if_new(request.user_id, summary, tags=["session"])
+```
+
+**Dedicated extractor LLM** — `_extract_memory()` now uses its own `ChatAnthropic` instance with `temperature=0`, `streaming=False`, `max_tokens=64`:
+
+```python
+extractor = ChatAnthropic(
+    model=settings.claude_model,
+    max_tokens=64,
+    temperature=0,
+    streaming=False,
+    ...
+)
+```
+
+**Stricter extraction prompt** — explicitly forbids preambles and gives a concrete output example:
+
+```
+Output ONLY one of:
+1. A single sentence starting with 'User' — e.g. 'User is a web developer learning AI agents with Python'
+2. The word NONE
+Do NOT write 'I understand', 'Got it', or anything else before or after.
+```
+
+**Post-processing guard** — if Claude still prefixes a preamble, the code finds the `"User ..."` sentence and returns only that:
+
+```python
+if not result.startswith("User"):
+    for sentence in result.split("."):
+        if sentence.strip().startswith("User"):
+            return sentence.strip()
+    return ""
+```
+
+**`response.content` list handling** — handles both string and list-of-blocks formats.
+
+### `vector_memory.py`
+
+**`MIN_SCORE` lowered** from `0.78` → `0.40`:
+
+```python
+MIN_SCORE = 0.40  # was 0.78
+```
+
+Personal memory queries are naturally indirect — `"Who am I"` is semantically related to `"User is a web developer"` but scores ~0.47. `0.40` catches valid memories while still rejecting unrelated content (which scores below 0.35).
+
+## One-time cleanup
+
+A `clear_user_memory.py` script was added to delete all records from `user_memory` (removes garbage data stored before the fix):
+
+```bash
+cd app-ai
+python clear_user_memory.py
+```
+
+---
+
 # Fix: pdfplumber → PyMuPDF + OCR; RAG_MIN_SCORE lowered to 0.50; new /rag/content endpoint
 
 **Files:** `src/routers/rag.py`, `src/config/settings.py`, `requirements.txt`

@@ -22,6 +22,7 @@
 # ─────────────────────────────────────────────────────────────────────────────
 
 import anthropic
+from langchain_anthropic import ChatAnthropic
 from langchain_core.messages import HumanMessage, SystemMessage, ToolMessage
 # HumanMessage  = a typed object representing one user message turn
 #                 Claude needs typed objects, not plain {"role": "user", ...} dicts
@@ -32,6 +33,9 @@ from src.llm.claude_client import llm, build_messages, build_system_prompt
 # llm               = the ChatAnthropic singleton (one shared Claude connection)
 # build_messages    = converts plain dicts → typed LangChain message objects
 # build_system_prompt = assembles Claude's instructions + injected long-term memory
+
+from src.config.settings import settings
+# settings = validated config (API keys, model name, Milvus URIs, etc.)
 
 from src.tools.registry import TOOLS, tool_map
 # TOOLS    = a list of all @tool functions Claude can call (web_search, calculator, etc.)
@@ -106,28 +110,61 @@ async def _extract_memory(user_message: str) -> str:
       This is a coroutine that makes ONE LLM call and returns the result.
       The caller must `await` it: `extracted = await _extract_memory(msg)`
     """
-    # Use the bare llm (no tools bound) — we just want a plain text answer.
-    # SystemMessage and HumanMessage are already imported at the top of this file.
-    extraction_prompt = (
-        "You extract durable personal facts from user messages for long-term memory.\n"
-        "Rules:\n"
-        "- If the message contains a personal fact (profession, preference, goal, skill, "
-        "background), rewrite it as a single concise sentence starting with 'User'.\n"
-        "- If the message is a question, greeting, or contains NO personal fact, "
-        "reply with exactly: NONE\n"
-        "- Reply with ONLY the fact sentence or NONE. No explanation."
+    # Use a dedicated low-temperature LLM instance — NOT the module-level `llm`.
+    # WHY NOT reuse `llm`?
+    #   `llm` has streaming=True and the default temperature, which causes Claude to
+    #   sometimes reply conversationally ("Got it! You're a developer...") instead of
+    #   returning only the fact sentence or NONE.
+    # temperature=0 = fully deterministic — no creative flair, just the extraction rule.
+    extractor = ChatAnthropic(
+        model=settings.claude_model,
+        max_tokens=64,          # fact sentence is short — no need for more
+        temperature=0,          # deterministic output
+        anthropic_api_key=settings.anthropic_api_key,
+        anthropic_api_url=settings.anthropic_base_url,
+        streaming=False,        # ainvoke() on a non-streaming client returns a clean str
     )
 
-    response = await llm.ainvoke([
+    extraction_prompt = (
+        "Extract a durable personal fact from the message below.\n"
+        "Output rules (strictly enforced):\n"
+        "- If a personal fact exists (profession, skill, preference, goal, background): "
+        "output EXACTLY one sentence. The sentence MUST start with the word 'User'. "
+        "Example: 'User is a web developer learning AI agents with Python'\n"
+        "- If no personal fact exists: output the single word NONE\n"
+        "- Your entire response must be that one sentence or the word NONE. "
+        "Do NOT write 'I understand', 'Got it', or anything else before or after."
+    )
+
+    response = await extractor.ainvoke([
         SystemMessage(content=extraction_prompt),
         HumanMessage(content=user_message),
     ])
 
-    # response.content is the plain text reply from Claude
-    result = response.content.strip()
+    # response.content can be a plain str OR a list of content blocks (ChatAnthropic quirk).
+    # Same handling as the streaming loop at the astream() section below.
+    content = response.content
+    if isinstance(content, list):
+        # Extract text from the first text-type block
+        result = "".join(
+            block.get("text", "") for block in content
+            if isinstance(block, dict) and block.get("type") == "text"
+        ).strip()
+    else:
+        result = content.strip()
 
     # Return empty string for "NONE" so callers can use a simple `if extracted:` check
-    return "" if result.upper() == "NONE" else result
+    if result.upper() == "NONE":
+        return ""
+    # Post-processing guard: if Claude still prefixed a preamble ("I understand. User..."),
+    # find the sentence that actually starts with "User" and return only that.
+    if not result.startswith("User"):
+        for sentence in result.split("."):
+            sentence = sentence.strip()
+            if sentence.startswith("User"):
+                return sentence
+        return ""  # no valid "User ..." sentence found — treat as nothing to store
+    return result
 
 
 async def run(request: AgentRequest):
@@ -368,6 +405,8 @@ async def run(request: AgentRequest):
     extracted = await _extract_memory(request.message)
     # extracted = a short fact string, e.g. "User is a web developer learning AI agents"
     # OR an empty string "" if nothing was worth remembering.
+
+    print(f"Extracted memory for user {request.user_id}: '{extracted}'")  # Debug log to verify extraction results
 
     if extracted:
         await memory.store_if_new(request.user_id, extracted, tags=["user_fact"])
