@@ -108,6 +108,13 @@ class Settings(BaseSettings):
     # ── Optional integrations ─────────────────────────────────────────────────
     tavily_api_key: str | None = None
     # `str | None` = this field can be a string OR None (the Python equivalent of TS's `string | null`).
+
+    # ── Client-supplied LLM credentials ───────────────────────────────────────
+    enable_internal_llm: bool = True
+    # When True (default): use the server-configured Anthropic key/model from .env.
+    # When False: require X-Ai-* headers from the client on every request.
+    #   Requests that omit X-Ai-Api-Key are rejected with HTTP 401 so the server's
+    #   API key is never consumed — useful when the web UI manages its own key.
     # If TAVILY_API_KEY is not in .env, it defaults to None — web search is skipped gracefully.
 
     class Config:

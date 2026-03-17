@@ -19,6 +19,26 @@ llm = ChatAnthropic(
     streaming=True,
 )
 
+def build_llm(
+    api_key: str,
+    model: str | None = None,
+    base_url: str | None = None,
+) -> ChatAnthropic:
+    """
+    Build a per-request ChatAnthropic client using caller-supplied credentials.
+
+    Used when client headers (X-Ai-Api-Key / X-Ai-Model / X-Ai-Base-Url) override
+    the server-configured singleton.  Falls back to settings values for any
+    parameter not explicitly provided.
+    """
+    return ChatAnthropic(
+        model=model or settings.claude_model,
+        max_tokens=settings.claude_max_tokens,
+        anthropic_api_key=api_key,
+        anthropic_api_url=base_url or settings.anthropic_base_url,
+        streaming=True,
+    )
+
 
 def build_messages(system_prompt: str, history: list[dict]) -> list[BaseMessage]:
     """

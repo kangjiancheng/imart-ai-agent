@@ -40,6 +40,12 @@ class Settings(BaseSettings):
     # ── Optional integrations ─────────────────────────────────────────────────
     tavily_api_key: str | None = None
 
+    # ── Client-supplied LLM credentials ───────────────────────────────────────
+    # When True: use the server-configured Anthropic key/model from .env.
+    # When False: require X-Ai-* headers from the client; reject requests that
+    # omit them so no server-side API key is consumed.
+    enable_internal_llm: bool = True
+
     class Config:
         env_file = ".env"
         extra = "ignore"

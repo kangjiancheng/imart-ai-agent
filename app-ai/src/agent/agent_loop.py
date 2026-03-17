@@ -29,8 +29,9 @@ from langchain_core.messages import HumanMessage, SystemMessage, ToolMessage
 # ToolMessage   = a typed object that carries a tool's result BACK to Claude
 #                 It must include `tool_call_id` so Claude knows which call it answers
 
-from src.llm.claude_client import llm, build_messages, build_system_prompt
+from src.llm.claude_client import llm, build_llm, build_messages, build_system_prompt
 # llm               = the ChatAnthropic singleton (one shared Claude connection)
+# build_llm         = factory for a per-request client using caller-supplied credentials
 # build_messages    = converts plain dicts → typed LangChain message objects
 # build_system_prompt = assembles Claude's instructions + injected long-term memory
 
@@ -87,7 +88,12 @@ def _summarize_iterations(iterations: list[dict]) -> str:
     )
 
 
-async def _extract_memory(user_message: str) -> str:
+async def _extract_memory(
+    user_message: str,
+    llm_api_key: str | None = None,
+    llm_model: str | None = None,
+    llm_base_url: str | None = None,
+) -> str:
     """
     Ask Claude to extract any durable personal facts from a single user message.
     Returns a short fact string, or "" if nothing is worth remembering.
@@ -117,11 +123,11 @@ async def _extract_memory(user_message: str) -> str:
     #   returning only the fact sentence or NONE.
     # temperature=0 = fully deterministic — no creative flair, just the extraction rule.
     extractor = ChatAnthropic(
-        model=settings.claude_model,
+        model=llm_model or settings.claude_model,
         max_tokens=64,          # fact sentence is short — no need for more
         temperature=0,          # deterministic output
-        anthropic_api_key=settings.anthropic_api_key,
-        anthropic_api_url=settings.anthropic_base_url,
+        anthropic_api_key=llm_api_key or settings.anthropic_api_key,
+        anthropic_api_url=llm_base_url or settings.anthropic_base_url,
         streaming=False,        # ainvoke() on a non-streaming client returns a clean str
     )
 
@@ -167,7 +173,12 @@ async def _extract_memory(user_message: str) -> str:
     return result
 
 
-async def run(request: AgentRequest):
+async def run(
+    request: AgentRequest,
+    llm_api_key: str | None = None,
+    llm_model: str | None = None,
+    llm_base_url: str | None = None,
+):
     """
     Main agent loop. An async generator — yields tokens for SSE streaming.
     Called directly by the FastAPI router (src/routers/agent.py).
@@ -177,7 +188,22 @@ async def run(request: AgentRequest):
 
     "generator" = instead of returning once, it yields many values over time.
                   Each `yield` sends one piece of text to the browser immediately.
+
+    Parameters
+    ----------
+    llm_api_key, llm_model, llm_base_url
+        When provided (from X-Ai-* request headers), a per-request ChatAnthropic
+        client is built using these credentials instead of the module-level singleton.
     """
+
+    # ── Resolve LLM client ────────────────────────────────────────────────────
+    # Use caller-supplied credentials if provided; otherwise fall back to the
+    # module-level singleton that uses the server's .env API key.
+    active_llm = (
+        build_llm(api_key=llm_api_key, model=llm_model, base_url=llm_base_url)
+        if llm_api_key
+        else llm
+    )
 
     # ── Step 1: recall long-term memory ──────────────────────────────────────
     # We do this FIRST so we can inject what we know about this user
@@ -213,7 +239,7 @@ async def run(request: AgentRequest):
     # Claude always reads the most recent message last — order matters!
 
     # ── Step 3: set up planner and budget ────────────────────────────────────
-    planner = llm.bind_tools(TOOLS)
+    planner = active_llm.bind_tools(TOOLS)
     # bind_tools() does TWO things:
     #   1. Tells Claude what tools exist (by embedding their schemas in the prompt)
     #   2. Configures Claude to respond with a structured "tool_call" instead of plain text
@@ -402,7 +428,12 @@ async def run(request: AgentRequest):
     #   Ask Claude to read the user's message and extract any durable personal facts.
     #   Claude returns an empty string if the message contains nothing worth remembering.
     #   This way we store ONLY signal, never noise.
-    extracted = await _extract_memory(request.message)
+    extracted = await _extract_memory(
+        request.message,
+        llm_api_key=llm_api_key,
+        llm_model=llm_model,
+        llm_base_url=llm_base_url,
+    )
     # extracted = a short fact string, e.g. "User is a web developer learning AI agents"
     # OR an empty string "" if nothing was worth remembering
     

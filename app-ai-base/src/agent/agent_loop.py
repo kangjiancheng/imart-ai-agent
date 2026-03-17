@@ -2,7 +2,7 @@ import anthropic
 from langchain_anthropic import ChatAnthropic
 from langchain_core.messages import HumanMessage, SystemMessage, ToolMessage
 
-from src.llm.claude_client import llm, build_messages, build_system_prompt
+from src.llm.claude_client import llm, build_llm, build_messages, build_system_prompt
 from src.config.settings import settings
 from src.tools.registry import TOOLS, tool_map
 from src.memory.vector_memory import VectorMemory
@@ -26,7 +26,12 @@ def _summarize_iterations(iterations: list[dict]) -> str:
     )
 
 
-async def _extract_memory(user_message: str) -> str:
+async def _extract_memory(
+    user_message: str,
+    llm_api_key: str | None = None,
+    llm_model: str | None = None,
+    llm_base_url: str | None = None,
+) -> str:
     """
     Ask Claude to extract a durable personal fact from a single user message.
     Returns a "User ..." sentence or "" if nothing is worth remembering.
@@ -36,11 +41,11 @@ async def _extract_memory(user_message: str) -> str:
     without the conversational flair of the main streaming llm.
     """
     extractor = ChatAnthropic(
-        model=settings.claude_model,
+        model=llm_model or settings.claude_model,
         max_tokens=64,
         temperature=0,
-        anthropic_api_key=settings.anthropic_api_key,
-        anthropic_api_url=settings.anthropic_base_url,
+        anthropic_api_key=llm_api_key or settings.anthropic_api_key,
+        anthropic_api_url=llm_base_url or settings.anthropic_base_url,
         streaming=False,
     )
 
@@ -80,7 +85,12 @@ async def _extract_memory(user_message: str) -> str:
     return result
 
 
-async def run(request: AgentRequest):
+async def run(
+    request: AgentRequest,
+    llm_api_key: str | None = None,
+    llm_model: str | None = None,
+    llm_base_url: str | None = None,
+):
     """
     Main ReAct agent loop. Async generator — yields string tokens for SSE streaming.
 
@@ -92,7 +102,20 @@ async def run(request: AgentRequest):
          - ainvoke → if tool_calls present, execute tools, append ToolMessages, repeat.
          - If no tool_calls → astream final answer, yield tokens, break.
       5. Extract personal facts and store session summary to long-term memory.
+
+    Parameters
+    ----------
+    llm_api_key, llm_model, llm_base_url
+        When provided, a per-request ChatAnthropic client is built from these
+        values instead of using the module-level singleton.  Supplied by the
+        router when the client sends X-Ai-* override headers.
     """
+    # ── Resolve LLM client ────────────────────────────────────────────────────
+    active_llm = (
+        build_llm(api_key=llm_api_key, model=llm_model, base_url=llm_base_url)
+        if llm_api_key
+        else llm
+    )
     # ── Step 1: recall long-term memory ──────────────────────────────────────
     memory   = VectorMemory()
     recalled = await memory.recall(request.user_id, request.message, top_k=5)
@@ -106,7 +129,7 @@ async def run(request: AgentRequest):
     messages.append(HumanMessage(content=request.message))
 
     # ── Step 3: set up planner and budget ────────────────────────────────────
-    planner    = llm.bind_tools(TOOLS)
+    planner    = active_llm.bind_tools(TOOLS)
     budget     = TokenBudget()
     iterations = []
     tokens_used = 0
@@ -187,7 +210,12 @@ async def run(request: AgentRequest):
             messages.append(ToolMessage(content=result, tool_call_id=tool_call["id"]))
 
     # ── Step 5: write to long-term memory ────────────────────────────────────
-    extracted = await _extract_memory(request.message)
+    extracted = await _extract_memory(
+        request.message,
+        llm_api_key=llm_api_key,
+        llm_model=llm_model,
+        llm_base_url=llm_base_url,
+    )
     if extracted:
         await memory.store_if_new(request.user_id, extracted, tags=["user_fact"])
 

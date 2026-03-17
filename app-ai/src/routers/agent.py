@@ -30,10 +30,11 @@ from fastapi import APIRouter, HTTPException
 # APIRouter = creates a group of routes (like Express Router in Node.js)
 # HTTPException = raises an HTTP error response with a status code and message
 
-from fastapi import Form, UploadFile, File
+from fastapi import Form, UploadFile, File, Header
 # Form      = marks a multipart form field (for /v1/agent/chat-with-file)
 # UploadFile = FastAPI's type for files uploaded via multipart/form-data
 # File(...)  = marks a form field as a required file upload
+# Header     = FastAPI dependency for reading HTTP request headers
 
 from fastapi.responses import StreamingResponse, JSONResponse
 # StreamingResponse = a FastAPI response that streams data in chunks.
@@ -71,6 +72,9 @@ from src.utils.file_parser import extract_text
 # Used by /v1/agent/chat-with-file to turn the uploaded file into a string
 # that is injected into Claude's context window.
 
+from src.config.settings import settings
+# settings = validated config (API keys, model name, enable_internal_llm toggle, etc.)
+
 
 # ── Module-level singletons ───────────────────────────────────────────────────
 # PYTHON CONCEPT — module-level instantiation (singleton pattern):
@@ -91,11 +95,45 @@ guardrails = GuardrailChecker()
 # Thread-safe because the checker doesn't store request-specific state.
 
 
+def _resolve_llm_headers(
+    x_ai_api_key: str | None,
+    x_ai_model: str | None,
+    x_ai_base_url: str | None,
+) -> tuple[str | None, str | None, str | None]:
+    """
+    Determine the effective LLM credentials for this request.
+
+    Rules:
+    - enable_internal_llm=True + no headers  → use server singleton (return None, None, None).
+    - enable_internal_llm=True + headers     → override with header values.
+    - enable_internal_llm=False + no headers → raise 401; client must supply X-Ai-Api-Key.
+    - enable_internal_llm=False + headers    → use header values.
+    """
+    if not settings.enable_internal_llm:
+        if not x_ai_api_key:
+            raise HTTPException(
+                status_code=401,
+                detail="Server LLM is disabled. Provide X-Ai-Api-Key in request headers.",
+            )
+        return x_ai_api_key, x_ai_model or None, x_ai_base_url or None
+
+    # Internal LLM enabled — use header values only when the client supplies them.
+    if x_ai_api_key:
+        return x_ai_api_key, x_ai_model or None, x_ai_base_url or None
+
+    return None, None, None
+
+
 # ── POST /v1/agent/chat ────────────────────────────────────────────────────────
 # The main agent streaming endpoint.
 
 @router.post("/agent/chat")
-async def agent_chat(request: AgentRequest):
+async def agent_chat(
+    request: AgentRequest,
+    x_ai_api_key:  str | None = Header(default=None),
+    x_ai_model:    str | None = Header(default=None),
+    x_ai_base_url: str | None = Header(default=None),
+):
     """
     Main streaming endpoint. Returns tokens as Server-Sent Events (SSE).
 
@@ -145,7 +183,13 @@ async def agent_chat(request: AgentRequest):
     # We update request.message so run() never sees raw PII.
     # GDPR/privacy compliance: Claude's context contains sanitized text only.
 
-    # ── Step 3: Branch on stream flag ────────────────────────────────────────
+    # ── Step 3: Resolve LLM credentials from headers or server config ────────
+    api_key, model, base_url = _resolve_llm_headers(x_ai_api_key, x_ai_model, x_ai_base_url)
+    # If the client sent X-Ai-Api-Key / X-Ai-Model / X-Ai-Base-Url headers,
+    # those values override the server's configured Claude singleton for this request.
+    # If enable_internal_llm=False and no headers were sent, raises HTTP 401.
+
+    # ── Step 4: Branch on stream flag ────────────────────────────────────────
     if request.stream:
         # ── Step 3a: Define the SSE token streaming generator ───────────────
         async def token_stream():
@@ -162,7 +206,7 @@ async def agent_chat(request: AgentRequest):
             #   In TypeScript: async function* tokenStream() { yield ...; }
 
             try:
-                async for token in run(request):
+                async for token in run(request, llm_api_key=api_key, llm_model=model, llm_base_url=base_url):
                     # run(request) is the agent loop — an async generator from agent_loop.py.
                     # `async for token in run(request)` iterates over yielded tokens.
                     # Each `token` is a string (one word or piece of a word from Claude).
@@ -233,7 +277,7 @@ async def agent_chat(request: AgentRequest):
     # chunks = every token yielded by run() will be appended here.
     # list[str] type hint = TypeScript equivalent: string[]
 
-    async for token in run(request):
+    async for token in run(request, llm_api_key=api_key, llm_model=model, llm_base_url=base_url):
         # Same loop as in the streaming case — run() is unchanged.
         # `async for` iterates the async generator and awaits each token.
         if token:
@@ -336,6 +380,10 @@ async def agent_chat_with_file(
     #   multipart form fields arrive as strings. Complex types like lists must
     #   be JSON-encoded by the sender and decoded manually by the receiver.
     #   This is the standard pattern for sending structured data in form submissions.
+
+    x_ai_api_key:  str | None = Header(default=None),
+    x_ai_model:    str | None = Header(default=None),
+    x_ai_base_url: str | None = Header(default=None),
 ):
     """
     Upload a document and ask a question about it in one request.
@@ -413,12 +461,15 @@ async def agent_chat_with_file(
         raise HTTPException(status_code=422, detail=guard_result.reason)
     agent_request.message = guard_result.sanitized_message
 
-    # ── Step 5: Stream or return the agent response ───────────────────────────
+    # ── Step 5: Resolve LLM credentials from headers or server config ─────────
+    api_key, model, base_url = _resolve_llm_headers(x_ai_api_key, x_ai_model, x_ai_base_url)
+
+    # ── Step 6: Stream or return the agent response ───────────────────────────
     # This mirrors the logic in agent_chat() above exactly.
     if agent_request.stream:
         async def token_stream():
             try:
-                async for token in run(agent_request):
+                async for token in run(agent_request, llm_api_key=api_key, llm_model=model, llm_base_url=base_url):
                     if token:
                         yield f"data: {_json.dumps({'type': 'token', 'content': token}, ensure_ascii=False)}\n\n"
             except Exception as exc:
@@ -434,7 +485,7 @@ async def agent_chat_with_file(
 
     # stream=False: collect all tokens, return single JSON response.
     chunks: list[str] = []
-    async for token in run(agent_request):
+    async for token in run(agent_request, llm_api_key=api_key, llm_model=model, llm_base_url=base_url):
         if token:
             chunks.append(token)
     return _UTF8JSONResponse(
