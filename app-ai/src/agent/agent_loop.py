@@ -404,10 +404,8 @@ async def run(request: AgentRequest):
     #   This way we store ONLY signal, never noise.
     extracted = await _extract_memory(request.message)
     # extracted = a short fact string, e.g. "User is a web developer learning AI agents"
-    # OR an empty string "" if nothing was worth remembering.
-
-    print(f"Extracted memory for user {request.user_id}: '{extracted}'")  # Debug log to verify extraction results
-
+    # OR an empty string "" if nothing was worth remembering
+    
     if extracted:
         await memory.store_if_new(request.user_id, extracted, tags=["user_fact"])
         # tags=["user_fact"] marks this as a Claude-extracted personal fact,
