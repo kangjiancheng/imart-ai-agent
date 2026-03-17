@@ -39,7 +39,9 @@ export default function ChatLayout() {
       streamBufferRef.current = '';
     },
     onError: (message: string) => {
-      updateLastAssistantMessage(chatId, `⚠️ Error: ${message}`);
+      const existing = streamBufferRef.current;
+      const errorSuffix = `\n\n⚠️ Error: ${message}`;
+      updateLastAssistantMessage(chatId, existing + errorSuffix);
       streamingChatIdRef.current = null;
       streamBufferRef.current = '';
     },
