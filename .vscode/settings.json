@@ -1,4 +1,21 @@
 {
   "deepscan.ignoreConfirmWarning": true,
-  "cSpell.words": ["Milvus", "pymilvus"]
+  "cSpell.words": ["Milvus", "pymilvus"],
+  "python-envs.pythonProjects": [
+    {
+      "path": "app-ai-base",
+      "envManager": "ms-python.python:venv",
+      "packageManager": "ms-python.python:pip"
+    },
+    {
+      "path": "app-ai",
+      "envManager": "ms-python.python:venv",
+      "packageManager": "ms-python.python:pip"
+    },
+    {
+      "path": "app-ai-simple",
+      "envManager": "ms-python.python:venv",
+      "packageManager": "ms-python.python:pip"
+    }
+  ]
 }
